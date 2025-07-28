@@ -1,0 +1,17 @@
+[project]
+name = "thoa"
+version = "0.1.0"
+description = "Thoa Command Line Interface for Remote Job Submission"
+authors = [
+    {name = "GWC GmbH",email = "hello@gwc-solutions.ch"}
+]
+license = {text = "MIT"}
+readme = "README.md"
+requires-python = "^3.7"
+dependencies = [
+]
+
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"

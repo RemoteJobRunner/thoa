@@ -10,7 +10,8 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v3
+      - name: Check out code
+        uses: actions/checkout@v3
 
       - name: Set up Python
         uses: actions/setup-python@v4
@@ -20,12 +21,18 @@ jobs:
       - name: Install Poetry
         run: |
           curl -sSL https://install.python-poetry.org | python3 -
-          echo "$HOME/.local/bin" >> $GITHUB_PATH
+        env:
+          POETRY_HOME: ${{ runner.temp }}/poetry
+        # Ensure Poetry is in PATH
+      - name: Add Poetry to PATH
+        run: echo "${{ runner.temp }}/poetry/bin" >> $GITHUB_PATH
 
       - name: Install dependencies
         run: poetry install --no-root
+        working-directory: ${{ github.workspace }}
 
       - name: Publish to PyPI
         env:
           POETRY_PYPI_TOKEN_PYPI: ${{ secrets.POETRY_PYPI_TOKEN_PYPI }}
         run: poetry publish --build
+        working-directory: ${{ github.workspace }}

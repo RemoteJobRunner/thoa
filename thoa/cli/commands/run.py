@@ -10,8 +10,18 @@ from rich.theme import Theme
 from rich import print as rprint
 from rich.spinner import Spinner
 from thoa.core import resolve_environment_spec
+from concurrent.futures import ThreadPoolExecutor
+
+import concurrent.futures
+from azure.storage.blob import BlobClient
 
 import time
+import hashlib
+import mmap
+from pathlib import Path
+import os
+max_threads = min(32, os.cpu_count() * 2) 
+
 
 console = Console(theme=Theme({
     "label": "bold cyan",
@@ -81,6 +91,173 @@ def validate_user_command(
     return res is not None 
 
 
+def collect_files(paths):
+    all_files = []
+    for path in paths:
+        if path.is_file():
+            all_files.append(path)
+        elif path.is_dir():
+            all_files.extend(path.rglob("*"))  # recursive
+    return [p for p in all_files if p.is_file()]  # filter out subdirs
+
+
+def compute_md5_buffered(path):
+    h = hashlib.md5()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""): 
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def compute_md5_mmap(path):
+    h = hashlib.md5()
+    with path.open("rb") as f:
+        with mmap.mmap(f.fileno(), length=0, access=mmap.ACCESS_READ) as mm:
+            h.update(mm)
+    return h.hexdigest()
+
+
+def choose_hash_strategy(path, mmap_threshold_bytes=10 * 1024 * 1024):
+    try:
+        size = path.stat().st_size
+        if size >= mmap_threshold_bytes:
+            return path, compute_md5_mmap(path)
+        else:
+            return path, compute_md5_buffered(path)
+    except Exception as e:
+        return path, f"ERROR: {e}"
+    
+
+def hash_all(files, workers=max_threads):
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        results = executor.map(choose_hash_strategy, files)
+    return dict(results)
+
+
+def file_sizes_in_bytes(paths, follow_symlinks=False):
+    size_map = {}
+    stack = [p for p in paths]
+
+    while stack:
+        path = stack.pop()
+
+        try:
+            if path.is_symlink() and not follow_symlinks:
+                continue
+
+            if path.is_file():
+                size_map[path] = path.stat().st_size
+            elif path.is_dir():
+                with os.scandir(path) as entries:
+                    for entry in entries:
+                        try:
+                            entry_path = Path(entry.path)
+                            if entry.is_symlink() and not follow_symlinks:
+                                continue
+                            if entry.is_file(follow_symlinks=follow_symlinks):
+                                size_map[entry_path] = entry.stat(follow_symlinks=follow_symlinks).st_size
+                            elif entry.is_dir(follow_symlinks=follow_symlinks):
+                                stack.append(entry_path)
+                        except (FileNotFoundError, PermissionError):
+                            pass  
+        except (FileNotFoundError, PermissionError):
+            pass
+
+    return size_map
+
+
+def all_files_have_upload_links(job_id, input_dataset_id, file_public_ids):
+    """Check if all files in the job have upload links."""
+    
+    links = api_client.get(
+        f"/temporary_links", 
+        params={
+            "job_public_id": job_id,
+            "input_dataset_public_id": input_dataset_id,
+            "link_type": "upload"
+        }
+    )
+
+    link_file_ids = {link['file_public_id'] for link in links}
+    return set(file_public_ids).issubset(set(link_file_ids))
+
+
+def upload_file_sas(local_path: Path, sas_url: str, local_md5: str, max_concurrency: int = 4):
+    """
+    Upload a file to Azure Blob Storage using a pre-signed SAS URL.
+    Uses parallel uploads for large files.
+    """
+    try:
+        blob_client = BlobClient.from_blob_url(sas_url)
+
+        print(f"Uploading: {local_path} -> {blob_client.blob_name}")
+        with open(local_path, "rb") as data:
+            blob_client.upload_blob(
+                data,
+                overwrite=True,
+                max_concurrency=max_concurrency,
+                metadata={
+                    "md5": local_md5,
+                    "upload": "incomplete"
+                }
+            )
+
+        # Retrieve existing metadata
+        props = blob_client.get_blob_properties()
+        metadata = props.metadata or {}
+
+        # Update "upload" status
+        metadata["upload"] = "complete"
+
+        # Apply updated metadata
+        blob_client.set_blob_metadata(metadata)
+
+        print(f"[SUCCESS] Uploaded {local_path.name} to {blob_client.blob_name}")
+    except Exception as e:
+        print(f"[ERROR] Failed to upload {local_path.name}: {e}")
+        raise
+
+
+def upload_all(upload_links, local_file_map, all_md5s, max_workers=4):
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = []
+
+        for link in upload_links:
+            file_id = link["file_public_id"]
+            local_path = Path(local_file_map.get(file_id))
+            local_md5 = all_md5s.get(local_path)
+
+            if not local_path.exists():
+                print(f"[WARN] File missing: {file_id} -> {local_path}")
+                continue
+
+            # Skip upload if hash already matches
+            if blob_exists_with_same_md5(link["url"], local_md5):
+                print(f"[SKIP] {local_path.name} already uploaded with matching MD5")
+                continue
+
+            futures.append(executor.submit(upload_file_sas, local_path, link["url"], local_md5))
+
+        for future in concurrent.futures.as_completed(futures):
+            try:
+                future.result()
+            except Exception:
+                pass 
+
+
+def blob_exists_with_same_md5(sas_url: str, local_md5: str) -> bool:
+    try:
+        blob_client = BlobClient.from_blob_url(sas_url)
+        props = blob_client.get_blob_properties()
+        remote_md5 = props.metadata.get("md5")
+
+        return remote_md5 == local_md5
+    except Exception as e:
+        # Blob doesn't exist or cannot read metadata
+        return False
+
+
+
 def run_cmd(
     inputs: Optional[List[str]] = None,
     input_dataset: Optional[str] = None,
@@ -118,14 +295,25 @@ def run_cmd(
         verbose=verbose
     )
 
-    # spinners = ['dots', 'dots2', 'dots3', 'dots4', 'dots5', 'dots6', 'dots7', 'dots8', 'dots9', 'dots10', 'dots11', 'dots12', 'dots8Bit', 'line', 'line2', 'pipe', 'simpleDots', 'simpleDotsScrolling', 'star', 'star2', 'flip', 'hamburger', 'growVertical', 'growHorizontal', 'balloon', 'balloon2', 'noise', 'bounce', 'boxBounce', 'boxBounce2', 'triangle', 'arc', 'circle', 'squareCorners', 'circleQuarters', 'circleHalves', 'squish', 'toggle', 'toggle2', 'toggle3', 'toggle4', 'toggle5', 'toggle6', 'toggle7', 'toggle8', 'toggle9', 'toggle10', 'toggle11', 'toggle12', 'toggle13', 'arrow', 'arrow2', 'arrow3', 'bouncingBar', 'bouncingBall', 'smiley', 'monkey', 'hearts', 'clock', 'earth', 'material', 'moon', 'runner', 'pong', 'shark', 'dqpb', 'weather', 'christmas', 'grenade', 'point', 'layer', 'betaWave', 'aesthetic']
-    # spinners_i_like = ['line', 'dots4', 'dots12', 'star', 'arrow3', 'bouncingBar', 'clock']
 
-    # STEP 1: Validate that the user has sufficient resources to run the job
+    # STEP 0: Validate that the user has sufficient resources to run the job
     valid = validate_user_command(n_cores=n_cores, ram=ram, storage=storage)
     
     if not valid: 
         return 
+
+
+    # STEP 1: Validate the user inputs
+    with console.status(f"Starting Job Submission Workflow", spinner="dots12"):
+
+        job_response = api_client.post("/jobs", json={
+            "requested_ram": ram,
+            "requested_cpu": n_cores,
+            "requested_disk_space": storage,
+            "requested_gpu_ram": 0,  # Assuming no GPUs for this example
+        })
+
+        print("Job started successfully with ID:", job_response.get("public_id"))
 
 
     # STEP 2: Package and create the environment object on the server
@@ -136,39 +324,94 @@ def run_cmd(
         environment_details = api_client.post("/environments", 
             json={
                 "tools": tool_list,
-                "env_string": env_spec,
+                "env_string": env_spec
             }
         )
         if not environment_details:
             console.print("[bold red]Failed to create environment. Please check your configuration.[/bold red]")
             return
         
+        updated_job_response = api_client.put(
+            f"/jobs/{job_response['public_id']}",
+            json={
+                "environment_public_id": environment_details["public_id"]
+            }
+        )
+
 
     # STEP 3: Trigger validation of the environment ASYNC 
     with console.status(f"Validating Environment", spinner="dots12"):
-        if environment_details.get("env_status") not in ["validated", "ready"]:
-            trigger_validation = api_client.post(
-                f"/environments/{environment_details['public_id']}/validate"
-            )
-            if not trigger_validation:
-                console.print("[bold red]Failed to trigger environment validation. Please try again.[/bold red]")
-                return
-        print(trigger_validation)
+        trigger_validation = {"env_status": "pending"}
+        while not trigger_validation.get("env_status") == "validated": 
+            try:
+                trigger_validation = api_client.get(
+                    f"/environments/{environment_details['public_id']}/validate"
+                )
+                time.sleep(4)
+            except:
+                time.sleep(1) 
+                continue
+
+
     # STEP 4: Hash the file objects and create them on the server, as well as the input dataset object
     with console.status(f"Hashing File Objects", spinner="dots12"):
-        time.sleep(4)
+        
+        all_files = collect_files(inputs)
+        file_sizes = file_sizes_in_bytes(all_files)
+        all_hashes = hash_all(all_files)
+        file_responses = []
+
+        for path, size in file_sizes.items():
+            
+            file_responses.append(api_client.post("/files", json={
+                "filename": str(path),
+                "md5sum": all_hashes[path],
+                "size": size,
+            }))
+
+        new_input_dataset = api_client.post("/input_datasets", json={
+            "files": [f['public_id'] for f in file_responses],
+        })
+
+        updated_job_response = api_client.put(
+            f"/jobs/{job_response['public_id']}",
+            json={
+                "input_dataset_public_id": new_input_dataset["public_id"]
+            }
+        )
 
     # STEP 5: Create signed azure URLs for the file objects
     with console.status(f"Creating Upload URLs for your files", spinner="dots12"):
-        time.sleep(4)
+        
+        while not all_files_have_upload_links(
+            updated_job_response['public_id'], 
+            new_input_dataset['public_id'],
+            [f.get("public_id") for f in file_responses]
+        ):
+            time.sleep(4)
 
-    # STEP 6: Initiate disk create and copy flow in the backend 
-    with console.status(f"Creating OS Disk for your job", spinner="dots12"):
-        time.sleep(4)
+        upload_links = api_client.get("/temporary_links", params={
+            "input_dataset_public_id": new_input_dataset['public_id'],
+            "job_public_id": updated_job_response['public_id'],
+            "link_type": "upload"
+        })
+
 
     # STEP 7: Upload the files to Azure
     with console.status(f"Uploading Files to Azure", spinner="dots12"):
-        time.sleep(4)
+        
+        file_map = {
+            f['public_id']: f['filename'] 
+            for f in file_responses
+        }
+
+        md5_map = {
+            f["public_id"]: all_hashes[Path(f["filename"])]
+            for f in file_responses
+        }
+
+        upload_all(upload_links, file_map, md5_map, max_workers=max_threads)
+
 
     # STEP 8: Poll the server for disk creation and copy status
     with console.status(f"Staging your files", spinner="dots12"):

@@ -18,8 +18,8 @@ def hello():
 
 @app.command("run")
 def run_cmd(
-    inputs: Path = typer.Option(
-        "./", "--input", "-i", help="Input files or directories to send to the job. "
+    inputs: List[Path] = typer.Option(
+        ["./"], "--input", "-i", help="Input files or directories to send to the job. "
         "Use multiple --inputs flags or specify globs like path/*. Defaults to current working directory.",
         resolve_path=True,
         exists=True,

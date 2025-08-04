@@ -52,6 +52,9 @@ class ApiClient:
     def post(self, path: str, **kwargs):
         return self._request("POST", path, **kwargs)
 
+    def put(self, path: str, **kwargs):
+        return self._request("PUT", path, **kwargs)
+
     def close(self):
         self.client.close()
 

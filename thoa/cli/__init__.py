@@ -30,7 +30,7 @@ def run_cmd(
     input_dataset: Optional[str] = typer.Option(
         None, "--input-dataset", help="Minihash identifying an existing input dataset (bypasses file upload)."
     ),
-    outputs: Path = typer.Option(
+    output: Path = typer.Option(
         "./", "--output", "-o", help="Output files or directories to download after job completion. "
         "Use multiple --outputs flags or specify globs like path/*. Defaults to current working directory.",
         resolve_path=True,
@@ -85,7 +85,7 @@ def run_cmd(
     run.run_cmd(
         inputs=inputs,
         input_dataset=input_dataset,
-        outputs=outputs,
+        output=output,
         n_cores=n_cores,
         ram=ram,
         storage=storage,

@@ -4,7 +4,7 @@ from typing import Optional
 class Settings(BaseSettings):
 
     THOA_API_URL: str = "http://localhost:3000"
-    THOA_API_KEY: Optional[str] = "rs_a8b6c4f5eb22b66d0d7a2383ed8405ed1406c76dc236d7d07e1fa20bd82c6911f4479de9a7"
+    THOA_API_KEY: Optional[str] = "rs_a3b7c0d9fb1c2a25ba94704f0f7ddb261b9e2b10d70f961219b7a54c9b9fa5c61b470a7021"
     THOA_API_TIMEOUT: int = 30
 
     class Config:

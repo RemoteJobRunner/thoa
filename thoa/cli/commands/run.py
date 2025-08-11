@@ -11,6 +11,7 @@ from rich import print as rprint
 from rich.spinner import Spinner
 from thoa.core import resolve_environment_spec
 from concurrent.futures import ThreadPoolExecutor
+from threading import Thread
 
 import concurrent.futures
 from azure.storage.blob import BlobClient
@@ -33,7 +34,7 @@ console = Console(theme=Theme({
 def print_config(
     inputs,
     input_dataset,
-    outputs,
+    output,
     n_cores,
     ram,
     storage,
@@ -50,7 +51,7 @@ def print_config(
     config = {
         "Inputs": inputs,
         "Input Dataset": input_dataset,
-        "Outputs": outputs,
+        "Outputs": output,
         "Number of Cores": n_cores,
         "RAM": f"{ram} GB" if ram else None,
         "Storage": f"{storage} GB" if storage else None,
@@ -173,7 +174,7 @@ def all_files_have_upload_links(job_id, input_dataset_id, file_public_ids):
         f"/temporary_links", 
         params={
             "job_public_id": job_id,
-            "input_dataset_public_id": input_dataset_id,
+            "dataset_public_id": input_dataset_id,
             "link_type": "upload"
         }
     )
@@ -261,7 +262,7 @@ def blob_exists_with_same_md5(sas_url: str, local_md5: str) -> bool:
 def run_cmd(
     inputs: Optional[List[str]] = None,
     input_dataset: Optional[str] = None,
-    outputs: Optional[List[str]] = None,
+    output: Optional[List[str]] = None,
     n_cores: Optional[int] = None,
     ram: Optional[int] = None,
     storage: Optional[int] = None,
@@ -280,7 +281,7 @@ def run_cmd(
     print_config(
         inputs=inputs,
         input_dataset=input_dataset,
-        outputs=outputs,
+        output=output,
         n_cores=n_cores,
         ram=ram,
         storage=storage,
@@ -306,15 +307,34 @@ def run_cmd(
     # STEP 1: Validate the user inputs
     with console.status(f"Starting Job Submission Workflow", spinner="dots12"):
 
+        script_response = api_client.post("/scripts", json={
+            "name": f"{job_name} script" or "Untitled Script",
+            "script_content": cmd,
+            "description": job_description or "No description provided",
+            "security_status": "pending"
+        })
+
+        current_working_directory = str(Path.cwd())
+
         job_response = api_client.post("/jobs", json={
             "requested_ram": ram,
             "requested_cpu": n_cores,
             "requested_disk_space": storage,
-            "requested_gpu_ram": 0,  # Assuming no GPUs for this example
+            "requested_gpu_ram": 0
         })
 
-        print("Job started successfully with ID:", job_response.get("public_id"))
 
+        updated_job_response = api_client.put(
+            f"/jobs/{job_response['public_id']}",
+            json={
+                "script_public_id": script_response["public_id"],
+                "current_working_directory": str(current_working_directory),
+                "download_directory": str(download_path),
+                "output_directory": str(output)
+            }
+        )
+
+        print("Job started successfully with ID:", job_response.get("public_id"))
 
     # STEP 2: Package and create the environment object on the server
     with console.status(f"Packaging Environment", spinner="dots12"):
@@ -340,17 +360,23 @@ def run_cmd(
 
 
     # STEP 3: Trigger validation of the environment ASYNC 
-    with console.status(f"Validating Environment", spinner="dots12"):
-        trigger_validation = {"env_status": "pending"}
-        while not trigger_validation.get("env_status") == "validated": 
+    def validate_env_background():
+
+        """Background thread to validate the environment."""
+
+        env_validation_result = {"env_status": "pending"}
+
+        while env_validation_result.get("env_status") != "validated":
             try:
-                trigger_validation = api_client.get(
+                env_validation_result = api_client.get(
                     f"/environments/{environment_details['public_id']}/validate"
                 )
                 time.sleep(4)
             except:
-                time.sleep(1) 
-                continue
+                time.sleep(1)
+
+    validation_thread = Thread(target=validate_env_background)
+    validation_thread.start()
 
 
     # STEP 4: Hash the file objects and create them on the server, as well as the input dataset object
@@ -369,7 +395,7 @@ def run_cmd(
                 "size": size,
             }))
 
-        new_input_dataset = api_client.post("/input_datasets", json={
+        new_input_dataset = api_client.post("/datasets", json={
             "files": [f['public_id'] for f in file_responses],
         })
 
@@ -391,10 +417,12 @@ def run_cmd(
             time.sleep(4)
 
         upload_links = api_client.get("/temporary_links", params={
-            "input_dataset_public_id": new_input_dataset['public_id'],
+            "dataset_public_id": new_input_dataset['public_id'],
             "job_public_id": updated_job_response['public_id'],
             "link_type": "upload"
         })
+
+        file_link_map = {link["file_public_id"]: link for link in upload_links}
 
 
     # STEP 7: Upload the files to Azure
@@ -410,8 +438,22 @@ def run_cmd(
             for f in file_responses
         }
 
+        for file_public_id, link in file_link_map.items():
+
+            link_id = link["public_id"]
+            filename = file_map.get(file_public_id)
+
+            updated_links = api_client.put(
+                f"/temporary_links/{link_id}",
+                json={
+                    "client_path": filename
+                }
+            )
+
         upload_all(upload_links, file_map, md5_map, max_workers=max_threads)
 
+
+    # api_client.stream_logs_blocking(job_response['public_id'], from_id="$")
 
     # STEP 8: Poll the server for disk creation and copy status
     with console.status(f"Staging your files", spinner="dots12"):

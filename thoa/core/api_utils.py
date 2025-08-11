@@ -2,6 +2,11 @@ import httpx
 from typing import Optional
 from thoa.config import settings
 from rich import print as rprint
+import asyncio, json, websockets 
+from rich.console import Console
+from rich.text import Text
+
+console = Console()
 
 class ErrorReadouts: 
     def __init__(self, status_code: int, detail: Optional[str] = None):
@@ -38,7 +43,8 @@ class ApiClient:
 
     def _request(self, method: str, path: str, **kwargs):
         
-        response = self.client.request(method, path, **kwargs)
+        api_path = f"/api{path}"
+        response = self.client.request(method, api_path, **kwargs)
         
         if response.status_code == 200: 
             return response.json()
@@ -57,6 +63,61 @@ class ApiClient:
 
     def close(self):
         self.client.close()
+
+    async def stream_logs(self, job_id: str, from_id: str = "$"):
+        """
+        Connects to ws://<base>/ws/logs/{job_id}?from_id=<from_id>
+        Sends X-API-Key and the same Accept header as HTTP client.
+        Prints lines as they arrive.
+        """
+        # Derive WS URL from base_url (supports http/https)
+        base = self.base_url
+        if base.startswith("https://"):
+            ws_base = "wss://" + base[len("https://"):]
+        elif base.startswith("http://"):
+            ws_base = "ws://" + base[len("http://"):]
+        else:
+            ws_base = "ws://" + base.lstrip("/")
+
+        url = f"{ws_base}/ws/logs/{job_id}?from_id={from_id}"
+        headers = {
+            "X-API-Key": self.api_key or "",
+            "Accept": "application/json",
+        }
+
+        async with websockets.connect(
+            url, 
+            additional_headers=headers, 
+            ping_interval=20, 
+            ping_timeout=20
+        ) as ws:
+            async for raw in ws:
+                try:
+                    msg = json.loads(raw)
+                except Exception:
+                    console.print(raw)
+                    continue
+
+                if msg.get("event") == "keepalive":
+                    continue
+                if msg.get("event") == "connected":
+                    console.print(f"[green]connected[/green] job={msg.get('job_id')} from_id={msg.get('from_id')}")
+                    continue
+                if msg.get("event") == "error":
+                    console.print(f"[red]error:[/red] {msg.get('message')}")
+                    break
+
+                # log entry
+                stream = msg.get("stream")
+                data = msg.get("data", "")
+                if stream == "stderr":
+                    console.print(Text(data, style="yellow"), end="")
+                else:
+                    console.print(Text(data, style="white"), end="")
+
+    def stream_logs_blocking(self, job_id: str, from_id: str = "$"):
+        """Convenience wrapper for sync CLIs."""
+        asyncio.run(self.stream_logs(job_id, from_id))
 
 api_client = ApiClient(
     base_url=settings.THOA_API_URL,

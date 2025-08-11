@@ -70,7 +70,6 @@ class ApiClient:
         Sends X-API-Key and the same Accept header as HTTP client.
         Prints lines as they arrive.
         """
-        # Derive WS URL from base_url (supports http/https)
         base = self.base_url
         if base.startswith("https://"):
             ws_base = "wss://" + base[len("https://"):]
@@ -86,9 +85,9 @@ class ApiClient:
         }
 
         async with websockets.connect(
-            url, 
-            additional_headers=headers, 
-            ping_interval=20, 
+            url,
+            additional_headers=headers,
+            ping_interval=20,
             ping_timeout=20
         ) as ws:
             async for raw in ws:
@@ -100,20 +99,31 @@ class ApiClient:
 
                 if msg.get("event") == "keepalive":
                     continue
+
                 if msg.get("event") == "connected":
                     console.print(f"[green]connected[/green] job={msg.get('job_id')} from_id={msg.get('from_id')}")
                     continue
+
                 if msg.get("event") == "error":
                     console.print(f"[red]error:[/red] {msg.get('message')}")
                     break
 
-                # log entry
+                if msg.get("event") == "done":
+                    if msg.get("success") == 1:
+                        console.print("[bold green]✅ Job succeeded[/bold green]")
+                    else:
+                        console.print("[bold red]❌ Job failed[/bold red]")
+                    await ws.close()
+                    break
+
+                # Standard log entries
                 stream = msg.get("stream")
                 data = msg.get("data", "")
+
                 if stream == "stderr":
-                    console.print(Text(data, style="yellow"), end="")
+                    console.print(f"[orange3][remote stderr][/orange3] {data}", end="")
                 else:
-                    console.print(Text(data, style="white"), end="")
+                    console.print(f"[blue][remote stdout][/blue] {data}", end="")
 
     def stream_logs_blocking(self, job_id: str, from_id: str = "$"):
         """Convenience wrapper for sync CLIs."""

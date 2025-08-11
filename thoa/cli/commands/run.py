@@ -167,6 +167,17 @@ def file_sizes_in_bytes(paths, follow_symlinks=False):
     return size_map
 
 
+def current_job_status(job_id: str):
+    """Fetch the current status of a job by its public ID."""
+    
+    response = api_client.get(f"/jobs?public_id={job_id}")[0] if api_client.get(f"/jobs?public_id={job_id}") else {}
+    
+    if response is None:
+        raise ValueError(f"Job with ID {job_id} not found or invalid.")
+
+    return response.get("status", "unknown")
+
+
 def all_files_have_upload_links(job_id, input_dataset_id, file_public_ids):
     """Check if all files in the job have upload links."""
     
@@ -452,25 +463,32 @@ def run_cmd(
 
         upload_all(upload_links, file_map, md5_map, max_workers=max_threads)
 
+        while current_job_status(updated_job_response['public_id']) in [
+            "created", "queued", "pending", "uploading"
+        ]:
+            time.sleep(4)
 
-    # api_client.stream_logs_blocking(job_response['public_id'], from_id="$")
+    with console.status(f"Validating your environment", spinner="dots12"):
+        while current_job_status(updated_job_response['public_id']) == "validating":
+            time.sleep(4)
 
     # STEP 8: Poll the server for disk creation and copy status
     with console.status(f"Staging your files", spinner="dots12"):
-        time.sleep(4)
+        while current_job_status(updated_job_response['public_id']) == "staging":
+            time.sleep(4)
 
     # STEP 9: Create the job object on the server, and initiate the job run flow
     with console.status(f"Spawning a Virtual Machine for your job", spinner="dots12"):
-        time.sleep(4)
-
-    # STEP 10: Poll the server for job status
-    with console.status(f"Polling for job flow status", spinner="dots12"):
-        time.sleep(4)
+        while current_job_status(updated_job_response['public_id']) == "provisioning":
+            time.sleep(4)
 
     # STEP 11: Establishing a connection to the job VM
     with console.status(f"Connecting to your job VM", spinner="dots12"):
-        time.sleep(4)
+        time.sleep(2)
+
+    api_client.stream_logs_blocking(job_response['public_id'], from_id="$")
 
     # STEP 12: Download output files to the local machine
-    with console.status(f"Job Completed! Preparing to download outputs", spinner="dots12"):
-        time.sleep(4) 
+    with console.status(f"Job Completed! Preparing your output dataset", spinner="dots12"):
+        while current_job_status(updated_job_response['public_id']) == "cleanup":
+            time.sleep(4) 

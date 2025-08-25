@@ -125,7 +125,7 @@ class ApiClient:
                 else:
                     console.print(f"[blue][remote stdout][/blue] {data}", end="")
 
-    def stream_logs_blocking(self, job_id: str, from_id: str = "$"):
+    def stream_logs_blocking(self, job_id: str, from_id: str = "0-0"):
         """Convenience wrapper for sync CLIs."""
         asyncio.run(self.stream_logs(job_id, from_id))
 

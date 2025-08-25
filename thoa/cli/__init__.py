@@ -51,14 +51,21 @@ def run_cmd(
     tools: Optional[str] = typer.Option(
         None, "--tools", help="List of tools (e.g., bwa, samtools=1.9). Use multiple flags or comma-separated values."
     ),
-    env_source: Optional[str] = typer.Option(
+    env_source: Optional[Path] = typer.Option(
         None, "--env-source", help="Environment specifier (e.g., environment.yml, env-name)."
     ),
     cmd: str = typer.Option(
         ..., "--cmd", help="The command to run inside the job environment."
     ),
-    download_path: Optional[str] = typer.Option(
-        None, "--download-path", help="Local path to download output files after job completion."
+    download_path: Optional[Path] = typer.Option(
+        None, 
+        "--download-dir", 
+        resolve_path=True,
+        writable=True,
+        dir_okay=True,
+        file_okay=False,
+        exists=True,
+        help="Local directory to download output files after job completion."
     ),
     run_async: bool = typer.Option(
         False, "--run-async", help="If set, stream VM outputs to terminal and keep session active."

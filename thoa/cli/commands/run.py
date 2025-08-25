@@ -199,6 +199,7 @@ def upload_file_sas(local_path: Path, sas_url: str, local_md5: str, max_concurre
     Upload a file to Azure Blob Storage using a pre-signed SAS URL.
     Uses parallel uploads for large files.
     """
+
     try:
         blob_client = BlobClient.from_blob_url(sas_url)
 
@@ -211,7 +212,8 @@ def upload_file_sas(local_path: Path, sas_url: str, local_md5: str, max_concurre
                 metadata={
                     "md5": local_md5,
                     "upload": "incomplete"
-                }
+                },
+                validate_content=True
             )
 
         # Retrieve existing metadata
@@ -406,6 +408,8 @@ def run_cmd(
                 "size": size,
             }))
 
+        names_to_public_ids = {f['filename']: f['public_id'] for f in file_responses}
+
         new_input_dataset = api_client.post("/datasets", json={
             "files": [f['public_id'] for f in file_responses],
         })
@@ -413,7 +417,8 @@ def run_cmd(
         updated_job_response = api_client.put(
             f"/jobs/{job_response['public_id']}",
             json={
-                "input_dataset_public_id": new_input_dataset["public_id"]
+                "input_dataset_public_id": new_input_dataset["public_id"],
+                "input_context": names_to_public_ids 
             }
         )
 
@@ -439,6 +444,7 @@ def run_cmd(
     # STEP 7: Upload the files to Azure
     with console.status(f"Uploading Files to Azure", spinner="dots12"):
         
+        # ITERATES OVER UPLOAD LINKS, DOES NOT ACCOUNT FOR DUPLICATES!!
         file_map = {
             f['public_id']: f['filename'] 
             for f in file_responses
@@ -486,9 +492,59 @@ def run_cmd(
     with console.status(f"Connecting to your job VM", spinner="dots12"):
         time.sleep(2)
 
-    api_client.stream_logs_blocking(job_response['public_id'], from_id="$")
+    api_client.stream_logs_blocking(job_response['public_id'], from_id="0-0")
 
     # STEP 12: Download output files to the local machine
     with console.status(f"Job Completed! Preparing your output dataset", spinner="dots12"):
         while current_job_status(updated_job_response['public_id']) == "cleanup":
             time.sleep(4) 
+            if current_job_status(updated_job_response['public_id']) == "completed":
+                break
+
+    with console.status(f"Downloading output files", spinner="dots12"):
+        
+        job_with_output = api_client.get(f"/jobs?public_id={updated_job_response['public_id']}")[0]
+        output_dataset_id = job_with_output.get("output_dataset_public_id")
+        
+        output_links = api_client.get(
+            "/temporary_links", 
+            params={
+                "dataset_public_id": output_dataset_id,
+                "job_public_id": updated_job_response['public_id'],
+                "link_type": "download_outputs"
+            }
+        )
+
+        for link in output_links:
+
+            remote_output_path_parent = Path(output)
+            local_output_path = Path(download_path) 
+
+            remote_link_path = Path(link.get("client_path"))
+            local_link_path = Path(str(remote_link_path).replace(str(remote_output_path_parent), str(local_output_path)))
+
+            if not local_link_path.parent.exists():
+                local_link_path.parent.mkdir(parents=True, exist_ok=True)
+
+            try:
+                sas_url = link["url"]
+                blob = BlobClient.from_blob_url(sas_url)
+                print(f"[DOWNLOAD] {blob.blob_name} -> {local_link_path}")
+                stream = blob.download_blob(max_concurrency=4)
+                with open(local_link_path, "wb") as fh:
+                    for chunk in stream.chunks():
+                        fh.write(chunk)
+
+                # Optional: verify MD5 if uploader set it in metadata
+                try:
+                    remote_md5 = (blob.get_blob_properties().metadata or {}).get("md5")
+                    if remote_md5:
+                        local_md5 = compute_md5_buffered(local_link_path)
+                        if local_md5 != remote_md5:
+                            print(f"[WARN] MD5 mismatch for {local_link_path.name}: remote={remote_md5} local={local_md5}")
+                except Exception:
+                    pass
+                print(f"[SUCCESS] Downloaded {local_link_path}")
+            except Exception as e:
+                print(f"[ERROR] Failed to download from {sas_url}: {e}")
+            

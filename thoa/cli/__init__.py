@@ -2,8 +2,10 @@ import typer
 from .commands import hello_world, goodbye_world, run
 from typing import Optional, List
 from pathlib import Path
+from .dataset_app import app as dataset_app
 
-app = typer.Typer()
+app = typer.Typer(help="THOA CLI tool", add_completion=False)
+app.add_typer(dataset_app, name="dataset", help="Dataset-related commands")
 
 @app.command("hello")
 def hello():
@@ -14,7 +16,6 @@ def hello():
 def hello():
     """Say goodbye"""
     goodbye_world.goodbye()
-
 
 @app.command("run")
 def run_cmd(

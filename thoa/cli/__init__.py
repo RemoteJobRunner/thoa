@@ -7,16 +7,6 @@ from .dataset_app import app as dataset_app
 app = typer.Typer(help="THOA CLI tool", add_completion=False)
 app.add_typer(dataset_app, name="dataset", help="Dataset-related commands")
 
-@app.command("hello")
-def hello():
-    """Say hello"""
-    hello_world.hello()
-
-@app.command("goodbye")
-def hello():
-    """Say goodbye"""
-    goodbye_world.goodbye()
-
 @app.command("run")
 def run_cmd(
     inputs: List[Path] = typer.Option(

@@ -12,6 +12,7 @@ from rich.spinner import Spinner
 from thoa.core import resolve_environment_spec
 from concurrent.futures import ThreadPoolExecutor
 from threading import Thread
+from thoa.config import settings
 
 import concurrent.futures
 from azure.storage.blob import BlobClient
@@ -113,7 +114,9 @@ def run_cmd(
             }
         )
 
-        print("Job started successfully with ID:", job_response.get("public_id"))
+        # print(f"Job started successfully. View at: {job_response.get("public_id")}")
+        console.print(
+            f"[bold green]Job started successfully. View at:[/bold green][bold cyan] {settings.THOA_UI_URL}/workbench/jobs/{job_response.get('public_id')}[/bold cyan]")
 
     # STEP 2: Package and create the environment object on the server
     with console.status(f"Packaging Environment", spinner="dots12"):

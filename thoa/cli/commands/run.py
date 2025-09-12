@@ -271,49 +271,49 @@ def run_cmd(
                 break
 
     with console.status(f"Downloading output files", spinner="dots12"):
-        
-        job_with_output = api_client.get(f"/jobs?public_id={updated_job_response['public_id']}")[0]
-        output_dataset_id = job_with_output.get("output_dataset_public_id")
-        
-        output_links = api_client.get(
-            "/temporary_links", 
-            params={
-                "dataset_public_id": output_dataset_id,
-                "job_public_id": updated_job_response['public_id'],
-                "link_type": "download_outputs"
-            }
-        )
-
-        for link in output_links:
-
-            remote_output_path_parent = Path(output)
-            local_output_path = Path(download_path) 
-
-            remote_link_path = Path(link.get("client_path"))
-            local_link_path = Path(str(remote_link_path).replace(str(remote_output_path_parent), str(local_output_path)))
-
-            if not local_link_path.parent.exists():
-                local_link_path.parent.mkdir(parents=True, exist_ok=True)
-
-            try:
-                sas_url = link["url"]
-                blob = BlobClient.from_blob_url(sas_url)
-                print(f"[DOWNLOAD] {blob.blob_name} -> {local_link_path}")
-                stream = blob.download_blob(max_concurrency=4)
-                with open(local_link_path, "wb") as fh:
-                    for chunk in stream.chunks():
-                        fh.write(chunk)
-
-                # Optional: verify MD5 if uploader set it in metadata
-                try:
-                    remote_md5 = (blob.get_blob_properties().metadata or {}).get("md5")
-                    if remote_md5:
-                        local_md5 = compute_md5_buffered(local_link_path)
-                        if local_md5 != remote_md5:
-                            print(f"[WARN] MD5 mismatch for {local_link_path.name}: remote={remote_md5} local={local_md5}")
-                except Exception:
-                    pass
-                print(f"[SUCCESS] Downloaded {local_link_path}")
-            except Exception as e:
-                print(f"[ERROR] Failed to download from {sas_url}: {e}")
+        if download_path:
+            job_with_output = api_client.get(f"/jobs?public_id={updated_job_response['public_id']}")[0]
+            output_dataset_id = job_with_output.get("output_dataset_public_id")
             
+            output_links = api_client.get(
+                "/temporary_links", 
+                params={
+                    "dataset_public_id": output_dataset_id,
+                    "job_public_id": updated_job_response['public_id'],
+                    "link_type": "download_outputs"
+                }
+            )
+
+            for link in output_links:
+
+                remote_output_path_parent = Path(output)
+                local_output_path = Path(download_path) 
+
+                remote_link_path = Path(link.get("client_path"))
+                local_link_path = Path(str(remote_link_path).replace(str(remote_output_path_parent), str(local_output_path)))
+
+                if not local_link_path.parent.exists():
+                    local_link_path.parent.mkdir(parents=True, exist_ok=True)
+
+                try:
+                    sas_url = link["url"]
+                    blob = BlobClient.from_blob_url(sas_url)
+                    print(f"[DOWNLOAD] {blob.blob_name} -> {local_link_path}")
+                    stream = blob.download_blob(max_concurrency=4)
+                    with open(local_link_path, "wb") as fh:
+                        for chunk in stream.chunks():
+                            fh.write(chunk)
+
+                    # Optional: verify MD5 if uploader set it in metadata
+                    try:
+                        remote_md5 = (blob.get_blob_properties().metadata or {}).get("md5")
+                        if remote_md5:
+                            local_md5 = compute_md5_buffered(local_link_path)
+                            if local_md5 != remote_md5:
+                                print(f"[WARN] MD5 mismatch for {local_link_path.name}: remote={remote_md5} local={local_md5}")
+                    except Exception:
+                        pass
+                    print(f"[SUCCESS] Downloaded {local_link_path}")
+                except Exception as e:
+                    print(f"[ERROR] Failed to download from {sas_url}: {e}")
+                

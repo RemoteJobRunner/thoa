@@ -1,7 +1,9 @@
 import typer
-from thoa.core.dataset_utils import list_datasets, download_dataset
+from thoa.core.dataset_utils import list_datasets, download_dataset, list_files_in_dataset
 from rich.panel import Panel
 from rich.console import Console
+from typing import List
+from typing import Optional
 
 console = Console()
 
@@ -32,9 +34,26 @@ def list_(
 @app.command("download")
 def download(
     dataset_id: str = typer.Argument(..., help="The UUID of the dataset to download."),
-    destination_path: str = typer.Argument(..., help="The path to download the dataset to.")
+    destination_path: str = typer.Argument(..., help="The path to download the dataset to."),
+    include: List[str] = typer.Option(None, "--include", "-i", help="List of file public IDs to include. If not set, includes all files."),
+    exclude: List[str] = typer.Option(None, "--exclude", "-e", help="List of file public IDs to exclude. If not set, excludes no files.")
 ):
     """Download a dataset by its UUID."""
-    download_dataset(dataset_id, destination_path)
+    download_dataset(
+        dataset_id, 
+        destination_path,
+        include=include,
+        exclude=exclude
+    )
+
+
+@app.command("ls") 
+def ls(
+    dataset_id: str = typer.Argument(..., help="The UUID of the dataset to list files from."),
+    level: Optional[int] = typer.Option(None, "--level", "-l", help="How many levels of the dataset hierarchy to display. If not set, all levels are displayed.")
+):
+    """List files in a dataset by its UUID."""
+    
+    list_files_in_dataset(dataset_id, level)
 
     

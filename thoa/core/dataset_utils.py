@@ -28,6 +28,7 @@ import shutil
 import base64
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import Counter
+import fnmatch
 
 console = Console()
 
@@ -35,6 +36,46 @@ FILE_WORKERS = min(16, (os.cpu_count() or 4) * 2)
 PER_BLOB_CONCURRENCY = 8                           
 CHUNK_SIZE = 8 * 1024 * 1024                       
 VERIFY_MD5 = False                                 
+
+def _filter_files_by_id_or_path(
+    files: dict[str, str],
+    include: list[str] | None,
+    exclude: list[str] | None,
+) -> dict[str, str]:
+    """
+    Filter files dict (path -> file_id) by include/exclude rules.
+    Rules may be path globs (on path strings) or exact file IDs.
+    """
+    if not include and not exclude:
+        return files
+
+    include = [str(x) for x in (include or [])]
+    exclude = [str(x) for x in (exclude or [])]
+
+    result = {}
+    for path, fid in files.items():
+        fid_str = str(fid)
+
+        # check include
+        if include:
+            ok = any(
+                fnmatch.fnmatch(path, pat) or fid_str == pat
+                for pat in include
+            )
+            if not ok:
+                continue
+
+        # check exclude
+        skip = any(
+            fnmatch.fnmatch(path, pat) or fid_str == pat
+            for pat in exclude
+        )
+        if skip:
+            continue
+
+        result[path] = fid
+    return result
+
 
 def _fmt_bytes(n: int) -> str:
     for unit in ["B","KiB","MiB","GiB","TiB","PiB"]:
@@ -220,22 +261,62 @@ def _download_one(path_string: str,
         return (path_string, file_id, False, f"error:{e!r}")
 
 
-def download_dataset(dataset_id: UUID, destination_path: str, *, verify_md5: bool = VERIFY_MD5):
-    """Download all files with outer+inner concurrency. Verify MD5 only if verify_md5=True."""
-    with console.status(f"[bold green]Preparing to download dataset [/bold green][bold cyan]{dataset_id}[/bold cyan][bold green] ...[/bold green]", spinner="dots12"):
+
+def download_dataset(
+    dataset_id: UUID,
+    destination_path: str,
+    include: list[str] = None,
+    exclude: list[str] = None,
+    *,
+    verify_md5: bool = VERIFY_MD5,
+):
+    """Download files from a dataset with optional include/exclude filters.
+
+    - include/exclude entries can be:
+        * glob patterns applied to paths (e.g. '*/variants.vcf', '*.bam')
+        * exact file IDs (UUID strings)
+    """
+    with console.status(
+        f"[bold green]Preparing to download dataset [/bold green][bold cyan]{dataset_id}[/bold cyan][bold green] ...[/bold green]",
+        spinner="dots12",
+    ):
         try:
-            dataset = client.get(f"/datasets?public_id={dataset_id}")
-            if not dataset:
-                console.print(Panel(f"[red]Dataset {dataset_id} not found.[/red]", title="Error", style="bold red"))
+            datasets = client.get(f"/datasets?public_id={dataset_id}")
+            if not datasets:
+                console.print(
+                    Panel(
+                        f"[red]Dataset {dataset_id} not found.[/red]",
+                        title="Error",
+                        style="bold red",
+                    )
+                )
                 return
-            dataset = dataset[0]
+            dataset = datasets[0]
 
             total_size = int(dataset.get("total_size", 0) or 0)
             dgb = round(total_size / 1024**3, 2)
 
             files = dataset.get("adjusted_context", {})
             if not files:
-                console.print(Panel(f"[yellow]Dataset {dataset_id} has no files to download.[/yellow]", title="Notice", style="bold"))
+                console.print(
+                    Panel(
+                        f"[yellow]Dataset {dataset_id} has no files to download.[/yellow]",
+                        title="Notice",
+                        style="bold",
+                    )
+                )
+                return
+
+            # Apply include/exclude filtering
+            files = _filter_files_by_id_or_path(files, include, exclude)
+            if not files:
+                console.print(
+                    Panel(
+                        "[yellow]No files matched include/exclude filters.[/yellow]",
+                        title="Filtered Out",
+                        style="bold yellow",
+                    )
+                )
                 return
 
             target = Path(destination_path).expanduser()
@@ -243,15 +324,17 @@ def download_dataset(dataset_id: UUID, destination_path: str, *, verify_md5: boo
             required = _required_with_headroom(total_size) if total_size > 0 else None
             if total_size > 0 and avail < required:
                 missing = required - avail
-                console.print(Panel(
-                    "[red]Insufficient disk space.[/red]\n"
-                    f"Required (with headroom): [bold]{_fmt_bytes(required)}[/bold]\n"
-                    f"Available at target:       [bold]{_fmt_bytes(avail)}[/bold]\n"
-                    f"Short by:                  [bold]{_fmt_bytes(missing)}[/bold]\n\n"
-                    "Free up space or choose another destination and try again.",
-                    title="Disk Space Check",
-                    style="bold red"
-                ))
+                console.print(
+                    Panel(
+                        "[red]Insufficient disk space.[/red]\n"
+                        f"Required (with headroom): [bold]{_fmt_bytes(required)}[/bold]\n"
+                        f"Available at target:       [bold]{_fmt_bytes(avail)}[/bold]\n"
+                        f"Short by:                  [bold]{_fmt_bytes(missing)}[/bold]\n\n"
+                        "Free up space or choose another destination and try again.",
+                        title="Disk Space Check",
+                        style="bold red",
+                    )
+                )
                 return
 
             base_dir = target.resolve()
@@ -262,17 +345,28 @@ def download_dataset(dataset_id: UUID, destination_path: str, *, verify_md5: boo
                 fid = str(file_id)
                 if fid in download_links:
                     continue
-                download_links[fid] = client.post(f"/temporary_links/{file_id}/request-download")
+                download_links[fid] = client.post(
+                    f"/temporary_links/{file_id}/request-download"
+                )
 
         except Exception as e:
-            console.print(Panel(f"[red]Error fetching dataset {dataset_id}:[/red] {e}", title="Error", style="bold red"))
+            console.print(
+                Panel(
+                    f"[red]Error fetching dataset {dataset_id}:[/red] {e}",
+                    title="Error",
+                    style="bold red",
+                )
+            )
             return
 
     total = len(files)
-    outcome_counts = Counter()          
+    outcome_counts = Counter()
     failures_details = []
 
-    with console.status(f"[bold green]Downloading {total} files to {destination_path} (~{dgb} GiB) ...[/bold green]", spinner="dots12"):
+    with console.status(
+        f"[bold green]Downloading {total} files to {destination_path} (~{dgb} GiB) ...[/bold green]",
+        spinner="dots12",
+    ):
         pool = ThreadPoolExecutor(max_workers=FILE_WORKERS)
         try:
             futures = [
@@ -302,27 +396,36 @@ def download_dataset(dataset_id: UUID, destination_path: str, *, verify_md5: boo
                     failures_details.append((path_string, note))
 
         except KeyboardInterrupt:
-            console.print(Panel("[red]Download interrupted by user (Ctrl+C)[/red]", title="Aborted", style="bold red"))
+            console.print(
+                Panel(
+                    "[red]Download interrupted by user (Ctrl+C)[/red]",
+                    title="Aborted",
+                    style="bold red",
+                )
+            )
             pool.shutdown(cancel_futures=True)
             raise
         except Exception as e:
             failures_details.append(("__executor__", f"error:{e!r}"))
             outcome_counts["failed"] += 1
         finally:
-            pool.shutdown(wait=True) 
+            pool.shutdown(wait=True)
 
     if failures_details:
         for p, note in failures_details:
-            console.print(Panel(f"[red]{note}[/red]\n{p}", title="File failed", style="bold red"))
+            console.print(
+                Panel(f"[red]{note}[/red]\n{p}", title="File failed", style="bold red")
+            )
 
-    console.print(Panel(
-        f"Success: [green]{outcome_counts.get('success', 0)}[/green]  •  "
-        f"Skipped(existing): [yellow]{outcome_counts.get('skipped', 0)}[/yellow]  •  "
-        f"Failed: [red]{outcome_counts.get('failed', 0)}[/red]",
-        title="Download Summary",
-        style="bold"
-    ))
-
+    console.print(
+        Panel(
+            f"Success: [green]{outcome_counts.get('success', 0)}[/green]  •  "
+            f"Skipped(existing): [yellow]{outcome_counts.get('skipped', 0)}[/yellow]  •  "
+            f"Failed: [red]{outcome_counts.get('failed', 0)}[/red]",
+            title="Download Summary",
+            style="bold",
+        )
+    )
 
 def list_datasets(n: int = None, sort_by: str = "created", ascending: bool = True):
     """
@@ -334,6 +437,7 @@ def list_datasets(n: int = None, sort_by: str = "created", ascending: bool = Tru
         ascending (bool): Sort order; True=ascending, False=descending.
     """
     try:
+    # if True: 
         with console.status("[bold cyan]Fetching datasets...[/bold cyan]", spinner="dots12"):
             my_datasets = client.get("/datasets")
 
@@ -388,3 +492,72 @@ def list_datasets(n: int = None, sort_by: str = "created", ascending: bool = Tru
 
     except Exception as e:
         console.print(Panel(f"[red]Error listing datasets:[/red] {e}", title="Error", style="bold red"))
+
+
+def _build_tree(files: dict[str, str]) -> dict:
+    """Build nested dict with file_ids at leaves."""
+    tree = {}
+    for path, fid in files.items():
+        parts = Path(path).parts
+        node = tree
+        for p in parts[:-1]:
+            node = node.setdefault(p, {})
+        node[parts[-1]] = {"__file_id__": fid}
+    return tree
+
+
+def _max_name_len(node: dict, depth: int = 0) -> int:
+    """Recursively compute max filename length for alignment."""
+    max_len = 0
+    for key, child in node.items():
+        if key == "__file_id__":
+            continue
+        length = len(key)
+        if "__file_id__" in child:
+            max_len = max(max_len, length)
+        if isinstance(child, dict):
+            max_len = max(max_len, _max_name_len(child, depth + 1))
+    return max_len
+
+
+
+def _print_tree(node: dict, prefix: str = "", level: int | None = None, depth: int = 0, name_pad: int | None = None):
+    if name_pad is None:
+        name_pad = _max_name_len(node)
+
+    keys = sorted(node.keys())
+    for i, key in enumerate(keys):
+        if key == "__file_id__":
+            continue
+        connector = "└── " if i == len(keys) - 1 else "├── "
+        entry = key
+        file_id = node[key].get("__file_id__") if isinstance(node[key], dict) else None
+
+        if file_id:
+            pad_len = name_pad - len(entry)
+            entry = f"{entry} {'─' * (pad_len + 4)} (file id: {file_id})"
+        console.print(f"{prefix}{connector}{entry}")
+
+        if isinstance(node[key], dict):
+            if level is None or depth + 1 < level:
+                extension = "    " if i == len(keys) - 1 else "│   "
+                _print_tree(node[key], prefix + extension, level, depth + 1, name_pad)
+
+
+def list_files_in_dataset(dataset_id: str, level: int | None = None):
+    """List files in a dataset by its UUID, displaying hierarchy as a tree."""
+    with console.status(f"[bold cyan]Fetching dataset {dataset_id}...[/bold cyan]", spinner="dots12"):
+        datasets = client.get(f"/datasets?public_id={dataset_id}")
+        if not datasets:
+            console.print(Panel(f"[red]Dataset {dataset_id} not found.[/red]", title="Error", style="bold red"))
+            return
+        dataset = datasets[0]
+
+    files = dataset.get("adjusted_context", {})
+    if not files:
+        console.print(Panel(f"[yellow]Dataset {dataset_id} has no files.[/yellow]", title="Notice", style="bold"))
+        return
+
+    tree = _build_tree(files)
+    console.print(f"[bold green]Dataset {dataset_id} file tree:[/bold green]")
+    _print_tree(tree, level=level)

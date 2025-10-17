@@ -282,6 +282,7 @@ def download_dataset(
     ):
         try:
             datasets = client.get(f"/datasets?public_id={dataset_id}")
+            
             if not datasets:
                 console.print(
                     Panel(
@@ -292,6 +293,26 @@ def download_dataset(
                 )
                 return
             dataset = datasets[0]
+            downloads_remaining = dataset.get("remaining_downloads")
+
+            if downloads_remaining > 0:
+                client.put(f"/datasets/{dataset_id}/decrement_downloads")
+                console.print(
+                    Panel(
+                        f"[green]Dataset {dataset_id} has {downloads_remaining - 1} downloads remaining.[/green]",
+                        title="Download Count",
+                        style="bold green",
+                    )
+                )
+            else:
+                console.print(
+                    Panel(
+                        f"[yellow]Dataset {dataset_id} has no remaining downloads.[/yellow]",
+                        title="Download Count",
+                        style="bold yellow",
+                    )
+                )
+                return
 
             total_size = int(dataset.get("total_size", 0) or 0)
             dgb = round(total_size / 1024**3, 2)

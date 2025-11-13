@@ -68,6 +68,17 @@ def run_cmd(
             "The --input-dataset option is not yet implemented. Please use --input to provide input files."
         )
 
+
+    if inputs:
+        all_files = collect_files(inputs)
+        if len(all_files) > 1000:
+            console.print(
+                "[bold red]Error:[/bold red] More than 1000 input files detected. "
+                "This amount is currently not supported. "
+                "Please consider compressing your files into an archive and try again."
+            )
+            raise typer.Exit(code=1)
+
     print_config(
         inputs=inputs,
         input_dataset=input_dataset,

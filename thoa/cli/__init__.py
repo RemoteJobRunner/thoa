@@ -9,9 +9,9 @@ app.add_typer(dataset_app, name="dataset", help="Dataset-related commands")
 
 @app.command("run")
 def run_cmd(
-    inputs: List[Path] = typer.Option(
-        ["./"], "--input", "-i", help="Input files or directories to send to the job. "
-        "Use multiple --inputs flags or specify globs like path/*. Defaults to current working directory.",
+    inputs: Optional[List[Path]] = typer.Option(
+        [], "--input", "-i", help="Input files or directories to send to the job. "
+        "Use multiple --input flags or specify globs like path/*. If omitted, no input files will be uploaded.",
         resolve_path=True,
         exists=True,
         readable=True,
@@ -74,6 +74,9 @@ def run_cmd(
         False, "--verbose", help="Enable verbose output."
     ),
 ):
+
+    has_input_data = bool(inputs) # or bool(input_dataset)
+
     """Run the job with the given configuration using the Bioconda-based execution environment."""
     # Input validation (optional, for runtime enforcement)
     if not tools and not env_source:
@@ -96,6 +99,7 @@ def run_cmd(
         job_description=job_description,
         dry_run=dry_run,
         verbose=verbose,
+        has_input_data=has_input_data,
     )
 
     

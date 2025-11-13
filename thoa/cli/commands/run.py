@@ -54,9 +54,19 @@ def run_cmd(
     job_name: Optional[str] = None,
     job_description: Optional[str] = None,
     dry_run: bool = False,
-    verbose: bool = False
+    verbose: bool = False,
+    has_input_data: bool = True,
 ):
     """Run the job with the given configuration using the Bioconda-based execution environment."""
+    
+    # BLOCK unsupported usage *before* any API calls
+    if input_dataset:
+        console.print(
+            "[bold red]The --input-dataset option is not yet implemented. This feature will be available in a future version.[/bold red]"
+        )
+        raise NotImplementedError(
+            "The --input-dataset option is not yet implemented. Please use --input to provide input files."
+        )
 
     print_config(
         inputs=inputs,
@@ -73,7 +83,7 @@ def run_cmd(
         job_name=job_name,
         job_description=job_description,
         dry_run=dry_run,
-        verbose=verbose
+        verbose=verbose,
     )
 
 
@@ -100,7 +110,8 @@ def run_cmd(
             "requested_ram": ram,
             "requested_cpu": n_cores,
             "requested_disk_space": storage,
-            "requested_gpu_ram": 0
+            "requested_gpu_ram": 0,
+            "has_input_data": has_input_data,
         })
 
 
@@ -163,94 +174,104 @@ def run_cmd(
 
     # STEP 4: Hash the file objects and create them on the server, as well as the input dataset object
     with console.status(f"Hashing File Objects", spinner="dots12"):
-        
-        all_files = collect_files(inputs)
-        file_sizes = file_sizes_in_bytes(all_files)
-        all_hashes = hash_all(all_files)
-        file_responses = []
 
-        for path, size in file_sizes.items():
-            
-            file_responses.append(api_client.post("/files", json={
-                "filename": str(path),
-                "md5sum": all_hashes[path],
-                "size": size,
-            }))
+        # No inputs provided at all
+        if not inputs:
+            console.print("[yellow]No input files specified. Skipping input upload.[/yellow]")
+            new_input_dataset = None
+            names_to_public_ids = {}
 
-        names_to_public_ids = {f['filename']: f['public_id'] for f in file_responses}
+        # -- input is provided
+        elif inputs:
+            all_files = collect_files(inputs)
+            file_sizes = file_sizes_in_bytes(all_files)
+            all_hashes = hash_all(all_files)
+            file_responses = []
 
-        new_input_dataset = api_client.post("/datasets", json={
-            "files": [f['public_id'] for f in file_responses],
-        })
+            for path, size in file_sizes.items():
+                
+                file_responses.append(api_client.post("/files", json={
+                    "filename": str(path),
+                    "md5sum": all_hashes[path],
+                    "size": size,
+                }))
 
-        updated_job_response = api_client.put(
-            f"/jobs/{job_response['public_id']}",
-            json={
-                "input_dataset_public_id": new_input_dataset["public_id"],
-                "input_context": names_to_public_ids 
-            }
-        )
+            names_to_public_ids = {f['filename']: f['public_id'] for f in file_responses}
 
-    # STEP 5: Create signed azure URLs for the file objects
-    with console.status(f"Creating Upload URLs for your files", spinner="dots12"):
-        
-        while not all_files_have_upload_links(
-            updated_job_response['public_id'], 
-            new_input_dataset['public_id'],
-            [f.get("public_id") for f in file_responses]
-        ):
-            time.sleep(4)
+            new_input_dataset = api_client.post("/datasets", json={
+                "files": [f['public_id'] for f in file_responses],
+            })
 
-        upload_links = api_client.get("/temporary_links", params={
-            "dataset_public_id": new_input_dataset['public_id'],
-            "job_public_id": updated_job_response['public_id'],
-            "link_type": "upload"
-        })
-
-        file_link_map = {link["file_public_id"]: link for link in upload_links}
-
-
-    # STEP 7: Upload the files to Azure
-    with console.status(f"Uploading Files to Azure", spinner="dots12"):
-        
-        # ITERATES OVER UPLOAD LINKS, DOES NOT ACCOUNT FOR DUPLICATES!!
-        file_map = {
-            f['public_id']: f['filename'] 
-            for f in file_responses
-        }
-
-        md5_map = {
-            f["public_id"]: all_hashes[Path(f["filename"])]
-            for f in file_responses
-        }
-
-        for file_public_id, link in file_link_map.items():
-
-            link_id = link["public_id"]
-            filename = file_map.get(file_public_id)
-
-            updated_links = api_client.put(
-                f"/temporary_links/{link_id}",
+        # Only update if we have an input dataset
+        if new_input_dataset:
+            updated_job_response = api_client.put(
+                f"/jobs/{job_response['public_id']}",
                 json={
-                    "client_path": filename
+                    "input_dataset_public_id": new_input_dataset["public_id"],
+                    "input_context": names_to_public_ids 
                 }
             )
+    if new_input_dataset:
+        # STEP 5: Create signed azure URLs for the file objects
+        with console.status(f"Creating Upload URLs for your files", spinner="dots12"):
+            
+            while not all_files_have_upload_links(
+                updated_job_response['public_id'], 
+                new_input_dataset['public_id'],
+                [f.get("public_id") for f in file_responses]
+            ):
+                time.sleep(4)
 
-        upload_all(upload_links, file_map, md5_map, max_workers=max_threads)
+            upload_links = api_client.get("/temporary_links", params={
+                "dataset_public_id": new_input_dataset['public_id'],
+                "job_public_id": updated_job_response['public_id'],
+                "link_type": "upload"
+            })
 
-        while current_job_status(updated_job_response['public_id']) in [
-            "created", "queued", "pending", "uploading"
-        ]:
-            time.sleep(4)
+            file_link_map = {link["file_public_id"]: link for link in upload_links}
 
-    with console.status(f"Validating your environment", spinner="dots12"):
-        while current_job_status(updated_job_response['public_id']) == "validating":
-            time.sleep(4)
 
-    # STEP 8: Poll the server for disk creation and copy status
-    with console.status(f"Staging your files", spinner="dots12"):
-        while current_job_status(updated_job_response['public_id']) == "staging":
-            time.sleep(4)
+        # STEP 7: Upload the files to Azure
+        with console.status(f"Uploading Files to Azure", spinner="dots12"):
+            
+            # ITERATES OVER UPLOAD LINKS, DOES NOT ACCOUNT FOR DUPLICATES!!
+            file_map = {
+                f['public_id']: f['filename'] 
+                for f in file_responses
+            }
+
+            md5_map = {
+                f["public_id"]: all_hashes[Path(f["filename"])]
+                for f in file_responses
+            }
+
+            for file_public_id, link in file_link_map.items():
+
+                link_id = link["public_id"]
+                filename = file_map.get(file_public_id)
+
+                updated_links = api_client.put(
+                    f"/temporary_links/{link_id}",
+                    json={
+                        "client_path": filename
+                    }
+                )
+
+            upload_all(upload_links, file_map, md5_map, max_workers=max_threads)
+
+            while current_job_status(updated_job_response['public_id']) in [
+                "created", "queued", "pending", "uploading"
+            ]:
+                time.sleep(4)
+
+        with console.status(f"Validating your environment", spinner="dots12"):
+            while current_job_status(updated_job_response['public_id']) == "validating":
+                time.sleep(4)
+
+        # STEP 8: Poll the server for disk creation and copy status
+        with console.status(f"Staging your files", spinner="dots12"):
+            while current_job_status(updated_job_response['public_id']) == "staging":
+                time.sleep(4)
 
     # STEP 9: Create the job object on the server, and initiate the job run flow
     with console.status(f"Spawning a Virtual Machine for your job", spinner="dots12"):

@@ -9,9 +9,11 @@ from rich.console import Console
 from rich.theme import Theme
 from rich import print as rprint
 from rich.spinner import Spinner
+from rich import box
 from thoa.core import resolve_environment_spec
 from concurrent.futures import ThreadPoolExecutor
 from threading import Thread
+from datetime import datetime
 
 import concurrent.futures
 from azure.storage.blob import BlobClient
@@ -269,3 +271,94 @@ def blob_exists_with_same_md5(sas_url: str, local_md5: str) -> bool:
         # Blob doesn't exist or cannot read metadata
         return False
 
+
+# ---------------------------
+# Timestamp helpers
+# ---------------------------
+def _parse_job_timestamp(ts: str):
+    """Return a datetime object parsed from an ISO timestamp."""
+    if not ts:
+        return None
+    formats = [
+        "%Y-%m-%dT%H:%M:%S.%fZ",
+        "%Y-%m-%dT%H:%M:%SZ",
+        "%Y-%m-%dT%H:%M:%S.%f",
+        "%Y-%m-%dT%H:%M:%S",
+    ]
+    for fmt in formats:
+        try:
+            return datetime.strptime(ts, fmt)
+        except ValueError:
+            pass
+    return None
+
+
+def _fmt_job_timestamp(ts: str) -> str:
+    """Convert ISO timestamp to 'Mon DD YYYY, HH:MM' text."""
+    dt = _parse_job_timestamp(ts)
+    if not dt:
+        return ts
+    return dt.strftime("%b %d %Y, %H:%M")
+
+
+# ---------------------------
+# Main job listing
+# ---------------------------
+def list_jobs(
+    limit: int = None,
+    sort_by: str = "started",
+    ascending: bool = False,
+):
+    try:
+        with console.status("[bold cyan]Fetching jobs...[/bold cyan]", spinner="dots12"):
+            jobs = api_client.get("/jobs")
+
+        if not jobs:
+            console.print(Panel("[yellow]No jobs found.[/yellow]", title="Jobs", style="bold"))
+            return
+
+        # Sorting
+        def sort_key(job):
+            if sort_by == "status":
+                return job.get("status", "")
+            return _parse_job_timestamp(job.get("started_at", "")) or datetime.min
+
+        jobs = sorted(jobs, key=sort_key, reverse=not ascending)
+
+        if limit:
+            jobs = jobs[:limit]
+
+        # Build table
+        table = Table(title="THOA Jobs", box=box.MINIMAL_DOUBLE_HEAD)
+        table.add_column("Name", style="cyan")
+        table.add_column("ID", style="cyan", no_wrap=True)
+        table.add_column("Started", style="green")
+        table.add_column("Status", style="magenta")
+        table.add_column("Input Dataset", style="blue")
+        table.add_column("Output Dataset", style="blue")
+
+        for job in jobs:
+            input_ds = job.get("input_dataset_public_id")[:8] if job.get("input_dataset_public_id") else ""
+            output_ds = job.get("output_dataset_public_id")[:8] if job.get("output_dataset_public_id") else ""
+
+            table.add_row(
+                job.get("name", ""),
+                job.get("public_id", ""),
+                _fmt_job_timestamp(job.get("started_at", "")),
+                job.get("status", ""),
+                input_ds,
+                output_ds,
+            )
+
+        console.print(table)
+        console.print(
+            Panel(
+                f"[green]Displayed {len(jobs)} job(s)[/green] "
+                f"(sorted by [bold]{sort_by}[/bold]).",
+                title="Summary",
+                style="bold",
+            )
+        )
+
+    except Exception as e:
+        console.print(Panel(f"[red]Error listing jobs:[/red] {e}", title="Error", style="bold red"))

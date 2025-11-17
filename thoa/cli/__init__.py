@@ -4,10 +4,12 @@ from typing import Optional, List
 from pathlib import Path
 from .dataset_app import app as dataset_app
 from .commands.tools import app as tools_app
+from .commands.jobs import app as jobs_app
 
 app = typer.Typer(help="THOA CLI tool", add_completion=False)
 app.add_typer(dataset_app, name="dataset", help="Dataset-related commands")
 app.add_typer(tools_app, name="tools")
+app.add_typer(jobs_app, name="jobs")
 
 
 @app.command("run")

@@ -22,6 +22,8 @@ import hashlib
 import mmap
 from pathlib import Path
 import os
+from pathlib import Path
+from typing import Union
 
 from thoa.core.job_utils import (
     print_config,
@@ -38,6 +40,12 @@ from thoa.core.job_utils import (
 )
 
 max_threads = min(32, os.cpu_count() * 2) 
+
+
+def resolve_user_path(p: Union[str, Path]) -> str:
+    if not p:
+        return p
+    return str(Path(p).expanduser().resolve())
 
 def run_cmd(
     inputs: Optional[List[str]] = None,
@@ -58,7 +66,8 @@ def run_cmd(
     has_input_data: bool = True,
 ):
     """Run the job with the given configuration using the Bioconda-based execution environment."""
-    
+    local_home = str(Path.home()) #/home/user
+    print(f"Resolved local home directory: {local_home}")
     # BLOCK unsupported usage *before* any API calls
     if input_dataset:
         console.print(
@@ -115,7 +124,20 @@ def run_cmd(
             "security_status": "pending"
         })
 
-        current_working_directory = str(Path.cwd())
+        current_working_directory = resolve_user_path(Path.cwd())
+        print(f"Resolved current working directory: {current_working_directory}")
+
+        if inputs:
+            inputs = [Path(resolve_user_path(i)) for i in inputs]
+            print(f"Resolved input paths: {inputs}")
+
+        if output:
+            output = resolve_user_path(output)
+            print(f"Resolved output path: {output}")
+
+        if download_path:
+            download_path = resolve_user_path(download_path)
+            print(f"Resolved download path: {download_path}")
 
         job_response = api_client.post("/jobs", json={
             "requested_ram": ram,
@@ -132,7 +154,8 @@ def run_cmd(
                 "script_public_id": script_response["public_id"],
                 "current_working_directory": str(current_working_directory),
                 "download_directory": str(download_path),
-                "output_directory": str(output)
+                "output_directory": str(output),
+                "client_home_directory": local_home
             }
         )
 

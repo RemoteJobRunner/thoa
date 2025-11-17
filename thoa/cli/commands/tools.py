@@ -2,7 +2,7 @@ import typer
 
 app = typer.Typer(
     help="Display available tools",
-    invoke_without_command=True
+    invoke_without_command=True # If the user runs thoa tools without choosing a subcommand, show the default information.”
 )
 
 BIOCONDA_URL = "https://bioconda.github.io/conda-package_index.html"

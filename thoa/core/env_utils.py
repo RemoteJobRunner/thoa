@@ -1,5 +1,7 @@
 from typing import Optional
 import os
+import platform
+import sys
 
 def resolve_environment_spec(env_source: Optional[str]) -> str:
     """
@@ -32,3 +34,22 @@ def resolve_environment_spec(env_source: Optional[str]) -> str:
             return f.read()
     except Exception as e:
         raise IOError(f"Failed to read environment file: {e}")
+
+def is_wsl() -> bool:
+    """Return True if running under Windows Subsystem for Linux."""
+    try:
+        return "microsoft" in platform.release().lower()
+    except Exception:
+        return False
+
+def block_windows_unless_wsl() -> None:
+    """
+    Block execution on native Windows (PowerShell, CMD, Git Bash).
+    Allow Linux, macOS, and WSL (Windows Subsystem for Linux).
+    """
+    system = platform.system().lower()
+
+    # Native Windows → block
+    if system == "windows" and not is_wsl():
+        print("Windows is not supported. Please use WSL, Linux, or macOS.")
+        sys.exit(1)

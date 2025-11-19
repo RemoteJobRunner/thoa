@@ -2,8 +2,6 @@ from typing import Optional
 import os
 import platform
 import sys
-import platform
-import sys
 from rich.console import Console
 from rich.panel import Panel
 

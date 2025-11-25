@@ -121,7 +121,6 @@ def run_cmd(
             "requested_ram": ram,
             "requested_cpu": n_cores,
             "requested_disk_space": storage,
-            "requested_gpu_ram": 0,
             "has_input_data": has_input_data,
         })
 

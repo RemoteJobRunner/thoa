@@ -188,9 +188,8 @@ def _safe_dest(base_dir: Path, key_path: str) -> Path:
         return (base_dir / tail).resolve()
     return (base_dir / p).resolve()
 
-# =========================
+
 # Per-file worker
-# =========================
 def _download_one(path_string: str,
                   file_id: str,
                   link_info: dict,
@@ -267,7 +266,6 @@ def download_dataset(
     destination_path: str,
     include: list[str] = None,
     exclude: list[str] = None,
-    *,
     verify_md5: bool = VERIFY_MD5,
 ):
     """Download files from a dataset with optional include/exclude filters.

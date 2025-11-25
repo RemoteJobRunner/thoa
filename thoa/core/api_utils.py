@@ -110,9 +110,9 @@ class ApiClient:
 
                 if msg.get("event") == "done":
                     if msg.get("success") == 1:
-                        console.print("[bold green]✅ Job succeeded[/bold green]")
+                        console.print("[bold green] Job succeeded [/bold green]")
                     else:
-                        console.print("[bold red]❌ Job failed[/bold red]")
+                        console.print("[bold red] Job failed [/bold red]")
                     await ws.close()
                     break
 

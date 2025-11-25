@@ -86,8 +86,7 @@ def validate_user_command(
     res = api_client.get("/users/validate_job_request", params={
         "n_cores": n_cores,
         "ram": ram,
-        "disk_space": storage,
-        "n_gpus": 0  # Assuming no GPUs for this example    
+        "disk_space": storage
     })
 
     return res is not None 
@@ -221,7 +220,6 @@ def upload_file_sas(local_path: Path, sas_url: str, local_md5: str, max_concurre
         props = blob_client.get_blob_properties()
         metadata = props.metadata or {}
 
-        # Update "upload" status
         metadata["upload"] = "complete"
 
         # Apply updated metadata
@@ -272,9 +270,7 @@ def blob_exists_with_same_md5(sas_url: str, local_md5: str) -> bool:
         return False
 
 
-# ---------------------------
 # Timestamp helpers
-# ---------------------------
 def _parse_job_timestamp(ts: str):
     """Return a datetime object parsed from an ISO timestamp."""
     if not ts:
@@ -301,9 +297,7 @@ def _fmt_job_timestamp(ts: str) -> str:
     return dt.strftime("%b %d %Y, %H:%M")
 
 
-# ---------------------------
 # Main job listing
-# ---------------------------
 def list_jobs(
     limit: int = None,
     sort_by: str = "started",

@@ -43,6 +43,11 @@ class ApiClient:
 
     def _request(self, method: str, path: str, **kwargs):
         
+        if not self.api_key:
+            rprint("[bold red]ERROR: No API key provided. Please set the THOA_API_KEY environment variable.[/bold red]\n")
+            rprint("You can obtain an API key from the THOA web interface at [blue]https://thoa.io/workbench/api_keys[/blue]")
+            return
+
         api_path = f"/api{path}"
         response = self.client.request(method, api_path, **kwargs)
         

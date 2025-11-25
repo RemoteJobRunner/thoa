@@ -59,7 +59,7 @@ def run_cmd(
 ):
     """Run the job with the given configuration using the Bioconda-based execution environment."""
     
-    # BLOCK unsupported usage *before* any API calls
+    
     if input_dataset:
         console.print(
             "[bold red]The --input-dataset option is not yet implemented. This feature will be available in a future version.[/bold red]"
@@ -97,7 +97,7 @@ def run_cmd(
         verbose=verbose,
     )
 
-
+    
     # STEP 0: Validate that the user has sufficient resources to run the job
     valid = validate_user_command(n_cores=n_cores, ram=ram, storage=storage)
     
@@ -122,6 +122,7 @@ def run_cmd(
             "requested_cpu": n_cores,
             "requested_disk_space": storage,
             "has_input_data": has_input_data,
+            "requested_gpu_ram": 0
         })
 
 

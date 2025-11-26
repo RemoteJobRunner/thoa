@@ -116,6 +116,9 @@ def run_cmd(
         })
 
         current_working_directory = str(Path.cwd())
+        client_home = str(Path.home())
+        client_uid = os.getuid()
+        client_gid = os.getgid()
 
         job_response = api_client.post("/jobs", json={
             "requested_ram": ram,
@@ -123,6 +126,9 @@ def run_cmd(
             "requested_disk_space": storage,
             "requested_gpu_ram": 0,
             "has_input_data": has_input_data,
+            "client_home": client_home,
+            "client_uid": client_uid,
+            "client_gid": client_gid,
         })
 
 

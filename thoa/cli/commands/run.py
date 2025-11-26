@@ -100,7 +100,7 @@ def run_cmd(
     
     # STEP 0: Validate that the user has sufficient resources to run the job
     valid = validate_user_command(n_cores=n_cores, ram=ram, storage=storage)
-    
+
     if not valid: 
         return 
 
@@ -121,8 +121,7 @@ def run_cmd(
             "requested_ram": ram,
             "requested_cpu": n_cores,
             "requested_disk_space": storage,
-            "has_input_data": has_input_data,
-            "requested_gpu_ram": 0
+            "has_input_data": has_input_data
         })
 
 

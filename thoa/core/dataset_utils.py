@@ -458,7 +458,15 @@ def list_datasets(n: int = None, sort_by: str = "created", ascending: bool = Tru
     try:
     # if True: 
         with console.status("[bold cyan]Fetching datasets...[/bold cyan]", spinner="dots12"):
-            my_datasets = client.get("/datasets")
+            my_datasets = client.get(
+                "/datasets",
+                params={
+                    "include_jobs_as_input": False,
+                    "include_jobs_as_output": False,
+                    "include_context": False,
+                    "include_adjusted_context": False,
+                }
+            )
 
         if not my_datasets:
             console.print(Panel("[yellow]No datasets found.[/yellow]", title="Datasets", style="bold"))

@@ -19,13 +19,22 @@ class ErrorReadouts:
                "[yellow]HINT: Have you set your API key in the environment variable THOA_API_KEY\n"
                "(e.g. 'echo $THOA_API_KEY')?[/yellow]")
             
+        elif self.status_code == 401: 
+            rprint("[bold red]401 Unauthorized: Authentication is required and has failed or has not yet been provided.[/bold red]\n\n"
+               "[yellow]HINT: Have you set your API key in the environment variable THOA_API_KEY\n"
+               "(e.g. 'echo $THOA_API_KEY')?[/yellow]")
+            
         elif self.status_code == 400: 
             rprint("[bold red]400 Bad Request: The request was invalid or cannot be served.[/bold red]\n\n"
                f"[yellow]SERVER MESSAGE:\n{self.detail}[/yellow]")
-            
+
         elif self.status_code == 500:
             rprint("[bold red]500 Internal Server Error: The server encountered an unexpected condition that prevented it from fulfilling the request.[/bold red]\n\n"
                "[yellow]HINT: This is likely a server-side issue. Please try again later or contact support.[/yellow]")
+
+        else: 
+            rprint(f"[bold red]{self.status_code} Error: An unexpected error occurred.[/bold red]\n\n"
+               f"[yellow]SERVER MESSAGE:\n{self.detail}[/yellow]")
 
 class ApiClient:
     def __init__(self, base_url: str, api_key: Optional[str] = None, timeout: int = 10):
@@ -45,13 +54,16 @@ class ApiClient:
         
         if not self.api_key:
             rprint("[bold red]ERROR: No API key provided. Please set the THOA_API_KEY environment variable.[/bold red]\n")
-            rprint("You can obtain an API key from the THOA web interface at [blue]https://thoa.io/workbench/api_keys[/blue]")
+            rprint(f"You can obtain an API key from the THOA web interface at [blue]{settings.THOA_UI_URL}/workbench/api_keys[/blue]")
             return
 
         api_path = f"/api{path}"
         response = self.client.request(method, api_path, **kwargs)
-        
+
         if response.status_code == 200: 
+            if settings.THOA_API_DEBUG:
+                rprint(f"[green]DEBUG: Successful {method} request to {api_path}[/green]")
+                rprint(f"[green]Response:[/green] {response.json()}")
             return response.json()
         else:
             ErrorReadouts(response.status_code, response.json().get("detail")).readout()

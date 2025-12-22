@@ -1,6 +1,6 @@
 [project]
 name = "thoa"
-version = "0.1.0"
+version = "0.1.2"
 description = "Thoa Command Line Interface for Remote Job Submission"
 authors = [
     {name = "GWC GmbH",email = "hello@gwc-solutions.ch"}
@@ -14,9 +14,13 @@ dependencies = [
     "typing-extensions (>=4.14.1,<5.0.0)",
     "httpx (>=0.28.1,<0.29.0)",
     "azure-storage-blob (>=12.26.0,<13.0.0)",
-    "websockets (>=15.0.1,<16.0.0)"
+    "websockets (>=15.0.1,<16.0.0)",
+    "snakemake-interface-executor-plugins (>=9.0,<10.0)",
+    "snakemake-interface-common (>=1.16,<2.0)"
 ]
 
+[project.entry-points."snakemake.executor"]
+thoa = "thoa.executors.snakemake:Executor"
 
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]

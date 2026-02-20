@@ -244,7 +244,7 @@ def run_cmd(
 
 
         # STEP 7: Upload the files to Azure
-        with console.status(f"Uploading Files to Azure", spinner="dots12"):
+        with console.status(f"Uploading Files to Thoa", spinner="dots12"):
             
             # ITERATES OVER UPLOAD LINKS, DOES NOT ACCOUNT FOR DUPLICATES!!
             file_map = {

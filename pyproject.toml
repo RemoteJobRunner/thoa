@@ -1,6 +1,6 @@
 [project]
 name = "thoa"
-version = "0.1.2"
+version = "0.1.3"
 description = "Thoa Command Line Interface for Remote Job Submission"
 authors = [
     {name = "GWC GmbH",email = "hello@gwc-solutions.ch"}

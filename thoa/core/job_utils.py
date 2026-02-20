@@ -203,7 +203,6 @@ def upload_file_sas(local_path: Path, sas_url: str, local_md5: str, max_concurre
     try:
         blob_client = BlobClient.from_blob_url(sas_url)
 
-        print(f"Uploading: {local_path} -> {blob_client.blob_name}")
         with open(local_path, "rb") as data:
             blob_client.upload_blob(
                 data,
@@ -225,7 +224,8 @@ def upload_file_sas(local_path: Path, sas_url: str, local_md5: str, max_concurre
         # Apply updated metadata
         blob_client.set_blob_metadata(metadata)
 
-        print(f"[SUCCESS] Uploaded {local_path.name} to {blob_client.blob_name}")
+        # print(f"[SUCCESS] Uploaded {local_path.name} to {blob_client.blob_name}")
+        print(f"[SUCCESS] Uploaded {local_path.name} to Thoa")
     except Exception as e:
         print(f"[ERROR] Failed to upload {local_path.name}: {e}")
         raise
@@ -238,14 +238,14 @@ def upload_all(upload_links, local_file_map, all_md5s, max_workers=4):
         for link in upload_links:
             file_id = link["file_public_id"]
             local_path = Path(local_file_map.get(file_id))
-            local_md5 = all_md5s.get(local_path)
+            local_md5 = all_md5s.get(file_id)
 
             if not local_path.exists():
                 print(f"[WARN] File missing: {file_id} -> {local_path}")
                 continue
 
             # Skip upload if hash already matches
-            if blob_exists_with_same_md5(link["url"], local_md5):
+            if blob_exists_with_same_md5(link["url"], local_md5, local_path):
                 print(f"[SKIP] {local_path.name} already uploaded with matching MD5")
                 continue
 
@@ -258,17 +258,37 @@ def upload_all(upload_links, local_file_map, all_md5s, max_workers=4):
                 pass 
 
 
-def blob_exists_with_same_md5(sas_url: str, local_md5: str) -> bool:
+def blob_exists_with_same_md5(sas_url: str, local_md5: str, local_path: Path | None = None) -> bool:
+    # if we don't know local hash, we cannot prove anything -> do not skip
+    if not local_md5:
+        return False
+
     try:
         blob_client = BlobClient.from_blob_url(sas_url)
         props = blob_client.get_blob_properties()
-        remote_md5 = props.metadata.get("md5")
 
-        return remote_md5 == local_md5
-    except Exception as e:
-        # Blob doesn't exist or cannot read metadata
+        # optional but great: size guard
+        if local_path is not None:
+            local_size = local_path.stat().st_size
+            remote_size = getattr(props, "size", None) or getattr(props, "content_length", None)
+            if remote_size is None or int(remote_size) != int(local_size):
+                return False
+
+        md = props.metadata or {}
+        remote_md5 = md.get("md5")
+               
+        if md.get("upload") != "complete":
+            return False
+
+        if remote_md5:
+            return remote_md5 == local_md5
+
+        # No usable checksum on the blob -> cannot prove match
         return False
 
+    except Exception:
+        return False
+    
 
 # Timestamp helpers
 def _parse_job_timestamp(ts: str):

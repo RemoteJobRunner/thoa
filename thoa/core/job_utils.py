@@ -201,6 +201,9 @@ def upload_file_sas(local_path: Path, sas_url: str, local_md5: str, max_concurre
     """
 
     try:
+        if local_path.is_symlink():
+            local_path = local_path.resolve()
+
         blob_client = BlobClient.from_blob_url(sas_url)
 
         with open(local_path, "rb") as data:

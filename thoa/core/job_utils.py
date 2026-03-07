@@ -135,7 +135,7 @@ def hash_all(files, workers=max_threads):
     return dict(results)
 
 
-def file_sizes_in_bytes(paths, follow_symlinks=False):
+def file_sizes_in_bytes(paths, follow_symlinks=True):
     size_map = {}
     stack = [p for p in paths]
 

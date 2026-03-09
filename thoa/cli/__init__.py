@@ -17,7 +17,7 @@ def run_cmd(
     inputs: Optional[List[Path]] = typer.Option(
         [], "--input", "-i", help="Input files or directories to send to the job. "
         "Use multiple --input flags or specify globs like path/*. If omitted, no input files will be uploaded.",
-        resolve_path=True,
+        resolve_path=False,
         exists=True,
         readable=True,
         dir_okay=True,

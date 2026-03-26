@@ -145,29 +145,23 @@ def run_cmd(
             "use_existing_input_dataset": use_existing_input_dataset,
         })
 
-        if inputs:
-            updated_job_response = api_client.put(
-                f"/jobs/{job_response['public_id']}",
-                json={
-                    "script_public_id": script_response["public_id"],
-                    "current_working_directory": str(current_working_directory),
-                    "download_directory": str(download_path),
-                    "output_directory": str(output)
-                }
-            )
+        # Always set script/cwd/output metadata so backend can build run_command
+        # and mount flags even when no input files are provided.
+        job_update_payload = {
+            "script_public_id": script_response["public_id"],
+            "current_working_directory": str(current_working_directory),
+            "download_directory": str(download_path),
+            "output_directory": str(output),
+        }
 
-        elif input_dataset:
-            updated_job_response = api_client.put(
-                f"/jobs/{job_response['public_id']}",
-                json={
-                    "script_public_id": script_response["public_id"],
-                    "current_working_directory": str(current_working_directory),
-                    "download_directory": str(download_path),
-                    "output_directory": str(output),
-                    "input_dataset_public_id": input_dataset,
-                    "input_context": input_dataset_response.get("adjusted_context", {}),
-                }
-            )
+        if input_dataset:
+            job_update_payload["input_dataset_public_id"] = input_dataset
+            job_update_payload["input_context"] = input_dataset_response.get("adjusted_context", {})
+
+        updated_job_response = api_client.put(
+            f"/jobs/{job_response['public_id']}",
+            json=job_update_payload,
+        )
 
         # print(f"Job started successfully. View at: {job_response.get("public_id")}")
         console.print(

@@ -37,7 +37,21 @@ from thoa.core.job_utils import (
     console
 )
 
-max_threads = min(32, os.cpu_count() * 2) 
+max_threads = min(32, os.cpu_count() * 2)
+
+
+def _print_env_build_failure(job_id: str) -> None:
+    console.print("\n[bold red]Environment Build Failed[/bold red]")
+    console.print("[red]The environment could not be validated.[/red]\n")
+    try:
+        detail = api_client.get(f"/jobs/{job_id}/detail")
+        build_logs = (detail or {}).get("environment", {}).get("build_logs")
+        if build_logs:
+            console.print("[bold yellow]Environment Build Logs:[/bold yellow]")
+            console.print(build_logs)
+    except Exception:
+        pass
+
 
 def run_cmd(
     inputs: Optional[List[str]] = None,
@@ -171,7 +185,7 @@ def run_cmd(
 
         env_validation_result = {"env_status": "pending"}
 
-        while env_validation_result.get("env_status") != "validated":
+        while env_validation_result.get("env_status") not in ("validated", "validation_failed"):
             try:
                 env_validation_result = api_client.get(
                     f"/environments/{environment_details['public_id']}/validate"
@@ -280,6 +294,10 @@ def run_cmd(
             while current_job_status(updated_job_response['public_id']) == "validating":
                 time.sleep(4)
 
+        if current_job_status(updated_job_response['public_id']) == "failed_validation":
+            _print_env_build_failure(updated_job_response['public_id'])
+            raise typer.Exit(code=1)
+
         # STEP 8: Poll the server for disk creation and copy status
         with console.status(f"Staging your files", spinner="dots12"):
             while current_job_status(updated_job_response['public_id']) == "staging":
@@ -293,6 +311,10 @@ def run_cmd(
     # STEP 11: Establishing a connection to the job VM
     with console.status(f"Connecting to your job VM", spinner="dots12"):
         time.sleep(2)
+
+    if current_job_status(updated_job_response['public_id']) == "failed_validation":
+        _print_env_build_failure(updated_job_response['public_id'])
+        raise typer.Exit(code=1)
 
     api_client.stream_logs_blocking(job_response['public_id'], from_id="0-0")
 

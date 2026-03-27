@@ -34,3 +34,18 @@ cd ~/thoa/thoa
 python3 -m venv venv
 source venv/bin/activate
 ```
+
+## Running tests
+### 1) Install test dependencies
+
+```bash
+cd ~/thoa
+source thoa/venv/bin/activate
+pip install pytest
+```
+
+### 2) Run tests
+
+```bash
+pytest tests/ -v
+```

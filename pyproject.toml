@@ -17,6 +17,17 @@ dependencies = [
     "websockets (>=15.0.1,<16.0.0)"
 ]
 
+<<<<<<< Updated upstream
+=======
+[project.optional-dependencies]
+snakemake = [
+    "snakemake-interface-common (>=1.21.0,<2.0.0)",
+    "snakemake-interface-executor-plugins (>=9.0.0,<10.0.0)",
+]
+
+[project.entry-points."snakemake.executor_plugins"]
+thoa = "thoa.executors.snakemake"
+>>>>>>> Stashed changes
 
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]

@@ -353,6 +353,10 @@ def run_cmd(
             while current_job_status(updated_job_response['public_id']) == "validating":
                 time.sleep(4)
 
+        if current_job_status(updated_job_response['public_id']) == "failed_validation":
+            _print_env_build_failure(updated_job_response['public_id'])
+            raise typer.Exit(code=1)
+
         with console.status(f"Staging your data", spinner="dots12"):
             while current_job_status(updated_job_response['public_id']) == "staging":
                 time.sleep(4)
@@ -366,15 +370,23 @@ def run_cmd(
             while current_job_status(updated_job_response['public_id']) == "validating":
                 time.sleep(4)
 
+        if current_job_status(updated_job_response['public_id']) == "failed_validation":
+            _print_env_build_failure(updated_job_response['public_id'])
+            raise typer.Exit(code=1)
+
     # STEP 9: Poll until the VM has been provisioned
     with console.status(f"Spawning a Virtual Machine for your job", spinner="dots12"):
         while current_job_status(updated_job_response['public_id']) == "provisioning":
             time.sleep(4)
 
+    if current_job_status(updated_job_response['public_id']) == "failed_validation":
+        _print_env_build_failure(updated_job_response['public_id'])
+        raise typer.Exit(code=1)
+
     # STEP 11: Wait until the VM is ready to stream logs, then connect
     with console.status(f"Connecting to your job VM", spinner="dots12"):
         while current_job_status(updated_job_response['public_id']) not in [
-            "running", "completed", "failed_execution", "failed_startup", "cancelled"
+            "running", "completed", "failed_execution", "failed_startup", "cancelled", "failed_validation"
         ]:
             time.sleep(4)
 

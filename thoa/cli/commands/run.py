@@ -70,20 +70,36 @@ def run_cmd(
     dry_run: bool = False,
     verbose: bool = False,
     has_input_data: bool = True,
+    use_existing_input_dataset: bool = False,
 ):
+    
     """Run the job with the given configuration using the Bioconda-based execution environment."""
     
-    
-    if input_dataset:
+    if input_dataset and inputs:
         console.print(
-            "[bold red]The --input-dataset option is not yet implemented. This feature will be available in a future version.[/bold red]"
+            "[bold red]Error:[/bold red] Cannot specify both --input and --input-dataset options at the same time. Please choose one or the other."
         )
-        raise NotImplementedError(
-            "The --input-dataset option is not yet implemented. Please use --input to provide input files."
-        )
+        exit(1)
 
+    if input_dataset:
+        all_files = []
+        input_dataset = input_dataset.strip()
+        input_dataset_response = api_client.get(f"/datasets?public_id={input_dataset}&include_adjusted_context=True&include_jobs_as_input=False&include_jobs_as_output=False")[0]
+        if input_dataset_response.get("deletion_pending"):
+            console.print("[bold red]Error:[/bold red] Dataset is pending deletion and cannot be used as input.")
+            raise typer.Exit(code=1)
 
-    if inputs:
+        dataset_size_bytes = input_dataset_response.get("total_size") or 0
+        disk_size_bytes = storage * (1024 ** 3)
+        if dataset_size_bytes > disk_size_bytes:
+            size_gb = dataset_size_bytes / (1024 ** 3)
+            console.print(
+                f"[bold red]Error:[/bold red] Dataset size ({size_gb:.1f} GB) exceeds "
+                f"requested disk space ({storage} GB). Re-run with --storage {int(size_gb) + 1} or larger."
+            )
+            raise typer.Exit(code=1)
+
+    elif inputs:
         all_files = collect_files(inputs)
         if len(all_files) > 1000:
             console.print(
@@ -92,6 +108,9 @@ def run_cmd(
                 "Please consider compressing your files into an archive and try again."
             )
             raise typer.Exit(code=1)
+
+    else: 
+        pass
 
     print_config(
         inputs=inputs,
@@ -110,7 +129,6 @@ def run_cmd(
         dry_run=dry_run,
         verbose=verbose,
     )
-
     
     # STEP 0: Validate that the user has sufficient resources to run the job
     valid = validate_user_command(n_cores=n_cores, ram=ram, storage=storage)
@@ -138,17 +156,25 @@ def run_cmd(
             "requested_disk_space": storage,
             "has_input_data": has_input_data,
             "client_home": client_home,
+            "use_existing_input_dataset": use_existing_input_dataset,
         })
 
+        # Always set script/cwd/output metadata so backend can build run_command
+        # and mount flags even when no input files are provided.
+        job_update_payload = {
+            "script_public_id": script_response["public_id"],
+            "current_working_directory": str(current_working_directory),
+            "download_directory": str(download_path),
+            "output_directory": str(output),
+        }
+
+        if input_dataset:
+            job_update_payload["input_dataset_public_id"] = input_dataset
+            job_update_payload["input_context"] = input_dataset_response.get("adjusted_context", {})
 
         updated_job_response = api_client.put(
             f"/jobs/{job_response['public_id']}",
-            json={
-                "script_public_id": script_response["public_id"],
-                "current_working_directory": str(current_working_directory),
-                "download_directory": str(download_path),
-                "output_directory": str(output)
-            }
+            json=job_update_payload,
         )
 
         # print(f"Job started successfully. View at: {job_response.get("public_id")}")
@@ -202,13 +228,27 @@ def run_cmd(
     with console.status(f"Hashing File Objects", spinner="dots12"):
 
         # No inputs provided at all
-        if not inputs:
+        if not input_dataset and not inputs:
             console.print("[yellow]No input files specified. Skipping input upload.[/yellow]")
             new_input_dataset = None
             names_to_public_ids = {}
 
-        # -- input is provided
+        elif input_dataset:
+            console.print("[yellow]Using existing input dataset. Files will be staged under:[/yellow]")
+            rel_paths = list(input_dataset_response.get("adjusted_context", {}).keys())
+            if len(rel_paths) <= 5:
+                for rel_path in rel_paths:
+                    console.print(f"  ./{rel_path}")
+            else:
+                for rel_path in rel_paths[:4]:
+                    console.print(f"  ./{rel_path}")
+                console.print(f"  ...")
+                console.print(f"  ./{rel_paths[-1]}")
+            new_input_dataset = None
+            names_to_public_ids = {}
+
         elif inputs:
+
             all_files = collect_files(inputs)
             file_sizes = file_sizes_in_bytes(all_files)
             all_hashes = hash_all(all_files)
@@ -237,6 +277,7 @@ def run_cmd(
                     "input_context": names_to_public_ids 
                 }
             )
+            
     if new_input_dataset:
         # STEP 5: Create signed azure URLs for the file objects
         with console.status(f"Creating Upload URLs for your files", spinner="dots12"):
@@ -303,14 +344,51 @@ def run_cmd(
             while current_job_status(updated_job_response['public_id']) == "staging":
                 time.sleep(4)
 
-    # STEP 9: Create the job object on the server, and initiate the job run flow
+    if input_dataset and not new_input_dataset:
+        with console.status(f"Queuing your job", spinner="dots12"):
+            while current_job_status(updated_job_response['public_id']) in ["created", "queued"]:
+                time.sleep(4)
+
+        with console.status(f"Validating your environment", spinner="dots12"):
+            while current_job_status(updated_job_response['public_id']) == "validating":
+                time.sleep(4)
+
+        if current_job_status(updated_job_response['public_id']) == "failed_validation":
+            _print_env_build_failure(updated_job_response['public_id'])
+            raise typer.Exit(code=1)
+
+        with console.status(f"Staging your data", spinner="dots12"):
+            while current_job_status(updated_job_response['public_id']) == "staging":
+                time.sleep(4)
+
+    if not new_input_dataset and not input_dataset:
+        with console.status(f"Queuing your job", spinner="dots12"):
+            while current_job_status(updated_job_response['public_id']) in ["created", "queued"]:
+                time.sleep(4)
+
+        with console.status(f"Validating your environment", spinner="dots12"):
+            while current_job_status(updated_job_response['public_id']) == "validating":
+                time.sleep(4)
+
+        if current_job_status(updated_job_response['public_id']) == "failed_validation":
+            _print_env_build_failure(updated_job_response['public_id'])
+            raise typer.Exit(code=1)
+
+    # STEP 9: Poll until the VM has been provisioned
     with console.status(f"Spawning a Virtual Machine for your job", spinner="dots12"):
         while current_job_status(updated_job_response['public_id']) == "provisioning":
             time.sleep(4)
 
-    # STEP 11: Establishing a connection to the job VM
+    if current_job_status(updated_job_response['public_id']) == "failed_validation":
+        _print_env_build_failure(updated_job_response['public_id'])
+        raise typer.Exit(code=1)
+
+    # STEP 11: Wait until the VM is ready to stream logs, then connect
     with console.status(f"Connecting to your job VM", spinner="dots12"):
-        time.sleep(2)
+        while current_job_status(updated_job_response['public_id']) not in [
+            "running", "completed", "failed_execution", "failed_startup", "cancelled", "failed_validation"
+        ]:
+            time.sleep(4)
 
     if current_job_status(updated_job_response['public_id']) == "failed_validation":
         _print_env_build_failure(updated_job_response['public_id'])

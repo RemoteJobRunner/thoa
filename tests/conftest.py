@@ -6,6 +6,8 @@ Spins up:
   2. Runs setup_test_db.py via backend's venv python to create schema + test user + API key
   3. Starts backend process with .env.test on port 9998
   4. Sets THOA_API_URL / THOA_API_KEY env vars for CLI to use
+  5. Monkey-patches module-level api_client singletons to point at the test backend
+     (fix /api/ prefix that the test backend does not have; the _DirectApiClient subclass skips that prefix)
 """
 
 import os
@@ -86,6 +88,35 @@ def _wait_for_backend(url: str, timeout: int = 30) -> bool:
     return False
 
 
+def _patch_api_client(base_url: str, api_key: str) -> None:
+    """
+    Replace the module-level api_client singletons used by CLI commands with a
+    direct test client.
+
+    The dev/production ApiClient._request prepends /api to every path (because
+    dev/production sits behind an nginx proxy that strips /api). The test backend
+    exposes routes without that prefix, so we need a subclass that skips it.
+    """
+    from thoa.core.api_utils import ApiClient
+    import thoa.core.dataset_utils as _ds
+    import thoa.core.job_utils as _jobs
+    import thoa.cli.commands.run as _run
+
+    class _DirectApiClient(ApiClient):
+        def _request(self, method: str, path: str, **kwargs):
+            if not self.api_key:
+                return None
+            response = self.client.request(method, path, **kwargs)
+            if response.status_code == 200:
+                return response.json()
+            return None
+
+    test_client = _DirectApiClient(base_url=base_url, api_key=api_key)
+    _ds.client = test_client
+    _jobs.api_client = test_client
+    _run.api_client = test_client
+
+
 @pytest.fixture(scope="session")
 def backend_url_and_key():
     _start_test_db()
@@ -102,6 +133,8 @@ def backend_url_and_key():
 
     os.environ["THOA_API_URL"] = BACKEND_TEST_URL
     os.environ["THOA_API_KEY"] = private_key
+
+    _patch_api_client(BACKEND_TEST_URL, private_key)
 
     yield BACKEND_TEST_URL, private_key
 

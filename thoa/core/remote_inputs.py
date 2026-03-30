@@ -103,7 +103,7 @@ def _wait_for_google_callback(expected_state: str, timeout_seconds: int = 300) -
     return str(payload["code"])
 
 
-def import_google_drive_input(folder_url: str) -> str:
+def import_google_drive_input(folder_url: str) -> dict[str, object]:
     folder_id = extract_google_drive_folder_id(folder_url)
     if not folder_id:
         console.print("[bold red]Invalid Google Drive folder URL.[/bold red]")
@@ -174,11 +174,14 @@ def import_google_drive_input(folder_url: str) -> str:
             if not status:
                 raise typer.Exit(code=1)
             if status["status"] == "completed":
-                dataset_public_id = status.get("dataset_public_id")
+                resolved = api_client.get(f"/data-transfers/{transfer_id}/resolved-context")
+                if not resolved:
+                    raise typer.Exit(code=1)
+                dataset_public_id = resolved.get("dataset_public_id")
                 if not dataset_public_id:
                     console.print("[bold red]Transfer completed without dataset id.[/bold red]")
                     raise typer.Exit(code=1)
-                return dataset_public_id
+                return resolved
             if status["status"] == "failed":
                 console.print(
                     f"[bold red]Google Drive import failed:[/bold red] {status.get('error_message') or 'unknown error'}"

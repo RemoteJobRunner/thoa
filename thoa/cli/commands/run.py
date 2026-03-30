@@ -76,6 +76,8 @@ def run_cmd(
     
     """Run the job with the given configuration using the Bioconda-based execution environment."""
     
+    remote_input_context = None
+
     if inputs:
         source_kind = detect_input_source_kind([str(value) for value in inputs])
         if source_kind == "mixed":
@@ -101,8 +103,9 @@ def run_cmd(
                 )
                 raise typer.Exit(code=1)
 
-            imported_dataset_id = import_google_drive_input(str(inputs[0]))
-            input_dataset = imported_dataset_id
+            imported_input = import_google_drive_input(str(inputs[0]))
+            input_dataset = str(imported_input["dataset_public_id"])
+            remote_input_context = imported_input.get("input_context") or {}
             inputs = []
             use_existing_input_dataset = True
 
@@ -201,7 +204,11 @@ def run_cmd(
 
         if input_dataset:
             job_update_payload["input_dataset_public_id"] = input_dataset
-            job_update_payload["input_context"] = input_dataset_response.get("adjusted_context", {})
+            job_update_payload["input_context"] = (
+                remote_input_context
+                if remote_input_context is not None
+                else input_dataset_response.get("adjusted_context", {})
+            )
 
         updated_job_response = api_client.put(
             f"/jobs/{job_response['public_id']}",

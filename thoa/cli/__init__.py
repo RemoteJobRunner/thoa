@@ -14,14 +14,9 @@ app.add_typer(jobs_app, name="jobs")
 
 @app.command("run")
 def run_cmd(
-    inputs: Optional[List[Path]] = typer.Option(
+    inputs: Optional[List[str]] = typer.Option(
         [], "--input", "-i", help="Input files or directories to send to the job. "
-        "Use multiple --input flags or specify globs like path/*. If omitted, no input files will be uploaded.",
-        resolve_path=False,
-        exists=True,
-        readable=True,
-        dir_okay=True,
-        file_okay=True
+        "Also accepts Google Drive folder URLs. If omitted, no input files will be uploaded.",
     ),
     input_dataset: Optional[str] = typer.Option(
         None, "--input-dataset", help="Minihash identifying an existing input dataset (bypasses file upload)."

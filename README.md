@@ -47,5 +47,9 @@ pip install pytest
 ### 2) Run tests
 
 ```bash
+#all
 pytest tests/ -v
+
+#Intergation CLI
+pytest tests/integration/test_cli_api.py -v
 ```

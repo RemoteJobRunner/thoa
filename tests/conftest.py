@@ -15,12 +15,18 @@ import time
 import subprocess
 import pytest
 import httpx
+from azure.storage.blob import BlobServiceClient
 
 BACKEND_DIR = os.path.expanduser("~/app/backend")
 BACKEND_PYTHON = os.path.join(BACKEND_DIR, "venv", "bin", "python")
 SETUP_SCRIPT = os.path.join(os.path.dirname(__file__), "setup_test_db.py")
 BACKEND_TEST_PORT = 9998
 BACKEND_TEST_URL = f"http://localhost:{BACKEND_TEST_PORT}"
+
+AZURITE_ENDPOINT = "http://127.0.0.1:10000/devstoreaccount1"
+AZURITE_ACCOUNT = "devstoreaccount1"
+AZURITE_KEY = "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw=="
+AZURITE_CONTAINER = "user-uploads"
 
 
 def _load_env_test() -> dict:
@@ -88,6 +94,18 @@ def _wait_for_backend(url: str, timeout: int = 30) -> bool:
     return False
 
 
+def _ensure_azurite_container() -> None:
+    blob_service = BlobServiceClient(AZURITE_ENDPOINT, credential=AZURITE_KEY)
+    try:
+        blob_service.create_container(AZURITE_CONTAINER)
+    except Exception:
+        pass  # already exists
+
+
+def azurite_blob_service() -> BlobServiceClient:
+    return BlobServiceClient(AZURITE_ENDPOINT, credential=AZURITE_KEY)
+
+
 def _patch_api_client(base_url: str, api_key: str) -> None:
     """
     Replace the module-level api_client singletons used by CLI commands with a
@@ -135,6 +153,7 @@ def backend_url_and_key():
     os.environ["THOA_API_KEY"] = private_key
 
     _patch_api_client(BACKEND_TEST_URL, private_key)
+    _ensure_azurite_container()
 
     yield BACKEND_TEST_URL, private_key
 

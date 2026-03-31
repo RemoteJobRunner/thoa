@@ -119,6 +119,28 @@ def test_dataset_ls_unknown_id_exits_ok():
     assert "not found" in result.output.lower() or "error" in result.output.lower()
 
 
+# --- dataset download ---
+
+def test_dataset_download_empty(backend_url_and_key, tmp_path):
+    """dataset download on a dataset without context (no job) — CLI exits 0 and reports no files."""
+    url, api_key = backend_url_and_key
+
+    file_id = _create_file(url, api_key)
+    ds = _create_dataset(url, api_key, [file_id])
+    ds_id = ds["public_id"]
+
+    result = runner.invoke(app, ["dataset", "download", ds_id, str(tmp_path)])
+    assert result.exit_code == 0
+    assert "no files" in result.output.lower() or "0" in result.output
+
+
+def test_dataset_download_unknown_id(tmp_path):
+    """dataset download с несуществующим UUID — CLI выходит 0, сообщает об ошибке."""
+    result = runner.invoke(app, ["dataset", "download", "00000000-0000-0000-0000-000000000000", str(tmp_path)])
+    assert result.exit_code == 0
+    assert "not found" in result.output.lower() or "error" in result.output.lower()
+
+
 # --- tools ---
 
 def test_tools_shows_bioconda_url():

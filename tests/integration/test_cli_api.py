@@ -121,6 +121,16 @@ def test_dataset_ls_unknown_id_exits_ok():
 
 # --- dataset download ---
 
+def test_dataset_download_real(download_fixture, tmp_path):
+    """Downloads a real blob from Azurite and checks the file content on disk."""
+    ds_id = download_fixture["dataset_public_id"]
+
+    result = runner.invoke(app, ["dataset", "download", ds_id, str(tmp_path)])
+    assert result.exit_code == 0, result.output
+    assert (tmp_path / "hello.txt").exists()
+    assert (tmp_path / "hello.txt").read_text() == "Hello, Azurite!"
+
+
 def test_dataset_download_empty(backend_url_and_key, tmp_path):
     """dataset download on a dataset without context (no job) — CLI exits 0 and reports no files."""
     url, api_key = backend_url_and_key
@@ -135,7 +145,7 @@ def test_dataset_download_empty(backend_url_and_key, tmp_path):
 
 
 def test_dataset_download_unknown_id(tmp_path):
-    """dataset download с несуществующим UUID — CLI выходит 0, сообщает об ошибке."""
+    """dataset download with non existing UUID — CLI goes with 0, sends and eeror"""
     result = runner.invoke(app, ["dataset", "download", "00000000-0000-0000-0000-000000000000", str(tmp_path)])
     assert result.exit_code == 0
     assert "not found" in result.output.lower() or "error" in result.output.lower()

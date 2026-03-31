@@ -12,6 +12,7 @@ Spins up:
 
 import os
 import time
+import json
 import subprocess
 import pytest
 import httpx
@@ -133,6 +134,43 @@ def _patch_api_client(base_url: str, api_key: str) -> None:
     _ds.client = test_client
     _jobs.api_client = test_client
     _run.api_client = test_client
+
+
+CREATE_DOWNLOAD_FIXTURE_SCRIPT = os.path.join(os.path.dirname(__file__), "create_test_download_fixture.py")
+
+
+def _create_download_fixture(env: dict) -> dict:
+    """Run create_test_download_fixture.py in backend's venv, return parsed JSON."""
+    proc_env = {**env, "PYTHONPATH": BACKEND_DIR}
+    result = subprocess.run(
+        [BACKEND_PYTHON, CREATE_DOWNLOAD_FIXTURE_SCRIPT],
+        cwd=BACKEND_DIR,
+        env=proc_env,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"create_test_download_fixture.py failed:\n{result.stderr}")
+    return json.loads(result.stdout.strip())
+
+
+@pytest.fixture(scope="session")
+def download_fixture(backend_url_and_key):
+    """
+    Creates a completed job with output_context in the test DB and uploads
+    the corresponding blob to Azurite. Returns fixture data dict with keys:
+      user_public_id, file_public_id, dataset_public_id
+    """
+    env = _load_env_test()
+    data = _create_download_fixture(env)
+
+    # Upload the blob to Azurite at {user_public_id}/{file_public_id}
+    blob_name = f"{data['user_public_id']}/{data['file_public_id']}"
+    blob_service = azurite_blob_service()
+    blob_client = blob_service.get_blob_client(AZURITE_CONTAINER, blob_name)
+    blob_client.upload_blob(b"Hello, Azurite!", overwrite=True)
+
+    return data
 
 
 @pytest.fixture(scope="session")

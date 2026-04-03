@@ -296,14 +296,16 @@ def run_cmd(
             file_sizes = file_sizes_in_bytes(all_files)
             all_hashes = hash_all(all_files)
             file_responses = []
+            local_path_by_public_id = {}
 
             for path, size in file_sizes.items():
-                
-                file_responses.append(api_client.post("/files", json={
+                response = api_client.post("/files", json={
                     "filename": str(path),
                     "md5sum": all_hashes[path],
                     "size": size,
-                }))
+                })
+                file_responses.append(response)
+                local_path_by_public_id[response["public_id"]] = str(path)
 
             names_to_public_ids = {f['filename']: f['public_id'] for f in file_responses}
 
@@ -344,15 +346,13 @@ def run_cmd(
         # STEP 7: Upload the files to Azure
         with console.status(f"Uploading Files to Thoa", spinner="dots12"):
             
-            # ITERATES OVER UPLOAD LINKS, DOES NOT ACCOUNT FOR DUPLICATES!!
-            file_map = {
-                f['public_id']: f['filename'] 
-                for f in file_responses
-            }
+            # Use the actual scanned local path, not FileModel.filename from the API,
+            # because dedup may reuse an existing file row with an old filename.
+            file_map = dict(local_path_by_public_id)
 
             md5_map = {
-                f["public_id"]: all_hashes[Path(f["filename"])]
-                for f in file_responses
+                public_id: all_hashes[Path(local_path)]
+                for public_id, local_path in local_path_by_public_id.items()
             }
 
             for file_public_id, link in file_link_map.items():

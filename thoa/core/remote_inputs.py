@@ -11,21 +11,25 @@ from thoa.core.api_utils import api_client
 from thoa.core.job_utils import console
 
 
-def detect_input_source_kind(inputs: list[str]) -> str:
-    kinds = set()
-    for raw in inputs:
-        value = str(raw).strip()
-        if extract_google_drive_folder_id(value):
-            kinds.add("google_drive")
-        elif value.startswith("s3://"):
-            kinds.add("s3")
-        else:
-            kinds.add("local")
-    if not kinds:
+def detect_input_source_kind(value: str | None) -> str:
+    if not value:
         return "none"
-    if len(kinds) > 1:
-        return "mixed"
-    return next(iter(kinds))
+    value = str(value).strip()
+    if extract_google_drive_folder_id(value):
+        return "google_drive"
+    if value.startswith("s3://"):
+        return "s3"
+    return "unknown"
+
+
+def project_input_context(input_root: str, input_context: dict[str, object]) -> dict[str, object]:
+    root = input_root.rstrip("/") or "/"
+    projected = {}
+    for path, file_id in input_context.items():
+        rel_path = str(path).lstrip("/")
+        projected_path = f"{root}/{rel_path}" if root != "/" else f"/{rel_path}"
+        projected[projected_path] = file_id
+    return projected
 
 
 def extract_google_drive_folder_id(value: str) -> str | None:

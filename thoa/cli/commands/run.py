@@ -36,7 +36,11 @@ from thoa.core.job_utils import (
     max_threads,
     console
 )
-from thoa.core.remote_inputs import detect_input_source_kind, import_google_drive_input
+from thoa.core.remote_inputs import (
+    detect_input_source_kind,
+    import_google_drive_input,
+    project_input_context,
+)
 
 max_threads = min(32, os.cpu_count() * 2)
 
@@ -56,6 +60,7 @@ def _print_env_build_failure(job_id: str) -> None:
 
 def run_cmd(
     inputs: Optional[List[str]] = None,
+    input_source: Optional[str] = None,
     input_dataset: Optional[str] = None,
     output: Optional[List[str]] = None,
     n_cores: Optional[int] = None,
@@ -78,38 +83,37 @@ def run_cmd(
     
     remote_input_context = None
 
-    if inputs:
-        source_kind = detect_input_source_kind([str(value) for value in inputs])
-        if source_kind == "mixed":
-            console.print(
-                "[bold red]Error:[/bold red] Mixed input source types are not supported in one run yet. "
-                "Use either all local paths or one Google Drive URL."
-            )
-            raise typer.Exit(code=1)
-
+    if input_source:
+        source_kind = detect_input_source_kind(input_source)
         if source_kind == "s3":
             console.print("[bold red]Error:[/bold red] S3 inputs are not implemented yet.")
             raise typer.Exit(code=1)
+        if source_kind != "google_drive":
+            console.print("[bold red]Error:[/bold red] Unsupported --input-source value.")
+            raise typer.Exit(code=1)
+        if input_dataset:
+            console.print(
+                "[bold red]Error:[/bold red] Cannot combine --input-dataset with --input-source."
+            )
+            raise typer.Exit(code=1)
+        if not inputs or len(inputs) != 1:
+            console.print(
+                "[bold red]Error:[/bold red] --input-source requires exactly one --input path "
+                "to act as the mounted execution path."
+            )
+            raise typer.Exit(code=1)
 
-        if source_kind == "google_drive":
-            if input_dataset:
-                console.print(
-                    "[bold red]Error:[/bold red] Cannot combine --input-dataset with a Google Drive --input URL."
-                )
-                raise typer.Exit(code=1)
-            if len(inputs) != 1:
-                console.print(
-                    "[bold red]Error:[/bold red] Only one Google Drive folder URL is supported per run for now."
-                )
-                raise typer.Exit(code=1)
+        imported_input = import_google_drive_input(input_source)
+        input_root = os.path.abspath(str(inputs[0]))
+        input_dataset = str(imported_input["dataset_public_id"])
+        remote_input_context = project_input_context(
+            input_root,
+            imported_input.get("input_context") or {},
+        )
+        inputs = []
+        use_existing_input_dataset = True
 
-            imported_input = import_google_drive_input(str(inputs[0]))
-            input_dataset = str(imported_input["dataset_public_id"])
-            remote_input_context = imported_input.get("input_context") or {}
-            inputs = []
-            use_existing_input_dataset = True
-
-    if input_dataset and inputs:
+    if input_dataset and inputs and not input_source:
         console.print(
             "[bold red]Error:[/bold red] Cannot specify both --input and --input-dataset options at the same time. Please choose one or the other."
         )

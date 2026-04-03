@@ -15,8 +15,12 @@ app.add_typer(jobs_app, name="jobs")
 @app.command("run")
 def run_cmd(
     inputs: Optional[List[str]] = typer.Option(
-        [], "--input", "-i", help="Input files or directories to send to the job. "
-        "Also accepts Google Drive folder URLs. If omitted, no input files will be uploaded.",
+        [], "--input", "-i", help="Local input files or directories to send to the job. "
+        "If omitted, no local input files will be uploaded.",
+    ),
+    input_source: Optional[str] = typer.Option(
+        None, "--input-source", help="Remote input source such as a Google Drive folder URL. "
+        "When set, --input is treated as the desired mounted path inside the job.",
     ),
     input_dataset: Optional[str] = typer.Option(
         None, "--input-dataset", help="Minihash identifying an existing input dataset (bypasses file upload)."
@@ -75,7 +79,7 @@ def run_cmd(
     ),
 ):
 
-    has_input_data = bool(inputs) or bool(input_dataset)
+    has_input_data = bool(inputs) or bool(input_dataset) or bool(input_source)
 
     """Run the job with the given configuration using the Bioconda-based execution environment."""
     # Input validation (optional, for runtime enforcement)
@@ -86,6 +90,7 @@ def run_cmd(
     run.run_cmd(
         inputs=inputs,
         input_dataset=input_dataset,
+        input_source=input_source,
         output=output,
         n_cores=n_cores,
         ram=ram,

@@ -39,9 +39,6 @@ from thoa.core.job_utils import (
 
 max_threads = min(32, os.cpu_count() * 2)
 
-# Must match VM_CANDIDATE_LIMIT in app/backend/core/constants.py
-VM_CANDIDATE_LIMIT = 10
-
 
 def _print_env_build_failure(job_id: str) -> None:
     console.print("\n[bold red]Environment Build Failed[/bold red]")
@@ -208,7 +205,7 @@ def run_cmd(
 
         estimate = api_client.get(
             "/azure_prices/estimate",
-            params={"n_cores": n_cores, "ram": ram, "limit": VM_CANDIDATE_LIMIT}
+            params={"n_cores": n_cores, "ram": ram, "limit": 10}
         )
 
         _print_dry_run_summary(

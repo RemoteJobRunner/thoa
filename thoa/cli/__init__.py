@@ -17,7 +17,7 @@ def run_cmd(
     inputs: Optional[List[Path]] = typer.Option(
         [], "--input", "-i", help="Input files or directories to send to the job. "
         "Use multiple --input flags or specify globs like path/*. If omitted, no input files will be uploaded.",
-        resolve_path=True,
+        resolve_path=False,
         exists=True,
         readable=True,
         dir_okay=True,
@@ -80,7 +80,7 @@ def run_cmd(
     ),
 ):
 
-    has_input_data = bool(inputs) # or bool(input_dataset)
+    has_input_data = bool(inputs) or bool(input_dataset)
 
     """Run the job with the given configuration using the Bioconda-based execution environment."""
     # Input validation (optional, for runtime enforcement)
@@ -105,6 +105,7 @@ def run_cmd(
         dry_run=dry_run,
         verbose=verbose,
         has_input_data=has_input_data,
+        use_existing_input_dataset=bool(input_dataset),
     )
 
     

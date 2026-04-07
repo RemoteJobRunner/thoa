@@ -9,7 +9,7 @@ class Settings(BaseSettings):
     THOA_API_DEBUG: bool = False
     THOA_API_TIMEOUT: int = 30
     THOA_GDRIVE_CALLBACK_HOST: str = "127.0.0.1"
-    THOA_GDRIVE_CALLBACK_PORT: int = 8765
+    THOA_GDRIVE_CALLBACK_PORT: int = 54389
     THOA_GDRIVE_OPEN_BROWSER: bool = True
 
     class Config:

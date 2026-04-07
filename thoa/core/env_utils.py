@@ -27,6 +27,8 @@ def resolve_environment_spec(env_source: Optional[str]) -> str:
     if env_source is None:
         return ""
 
+    env_source = str(env_source)
+
     if not env_source.endswith((".yml", ".yaml")):
         raise ValueError(f"Unsupported environment source format: {env_source}")
 

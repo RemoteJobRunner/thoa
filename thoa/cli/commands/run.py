@@ -58,6 +58,50 @@ def _print_env_build_failure(job_id: str) -> None:
         pass
 
 
+def _print_dry_run_summary(
+    n_files: int,
+    total_size_bytes: int,
+    dataset_source: str,
+    estimate,
+    validation_passed: bool,
+):
+    if total_size_bytes < 1024:
+        size_str = f"{total_size_bytes} B"
+    elif total_size_bytes < 1024 ** 2:
+        size_str = f"{total_size_bytes / 1024:.1f} KB"
+    elif total_size_bytes < 1024 ** 3:
+        size_str = f"{total_size_bytes / 1024 ** 2:.1f} MB"
+    else:
+        size_str = f"{total_size_bytes / 1024 ** 3:.2f} GB"
+
+    table = Table(show_header=False, box=None, expand=False, padding=(0, 1))
+
+    if dataset_source == "upload":
+        table.add_row("[label]Input Files[/label]", f"[value]{n_files} file(s) ({size_str})[/value]")
+        table.add_row("[label]Dataset Source[/label]", "[value]New upload[/value]")
+    elif dataset_source == "existing":
+        table.add_row("[label]Input Dataset[/label]", f"[value]{n_files} file(s) ({size_str})[/value]")
+        table.add_row("[label]Dataset Source[/label]", "[value]Existing dataset (no upload)[/value]")
+    else:
+        table.add_row("[label]Input Files[/label]", "[value]None[/value]")
+
+    if estimate:
+        table.add_row("", "")
+        table.add_row("[label]Estimated cost[/label]", f"[value]{estimate['min_credits_per_hour']:.1f} credits/hr[/value]")
+        table.add_row("[label]Price range[/label]",    f"[value]{estimate['min_credits_per_hour']:.1f} – {estimate['max_credits_per_hour']:.1f} credits/hr[/value]")
+    else:
+        table.add_row("[label]Cost Estimate[/label]", "[warning]Unavailable — no matching VMs found for requested specs[/warning]")
+
+    table.add_row("", "")
+    if validation_passed:
+        table.add_row("[label]Validation[/label]", "[bold green]✓ Passed — job would be accepted[/bold green]")
+    else:
+        table.add_row("[label]Validation[/label]", "[bold red]✗ Failed — see errors above[/bold red]")
+
+    console.print(Panel(table, title="[bold yellow]Dry Run Summary[/bold yellow]", expand=False, border_style="yellow"))
+    console.print("[yellow]Dry run complete. No job was submitted.[/yellow]")
+
+
 def run_cmd(
     inputs: Optional[List[str]] = None,
     input_source: Optional[str] = None,
@@ -171,8 +215,45 @@ def run_cmd(
     # STEP 0: Validate that the user has sufficient resources to run the job
     valid = validate_user_command(n_cores=n_cores, ram=ram, storage=storage)
 
-    if not valid: 
-        return 
+    if not valid:
+        if dry_run:
+            _print_dry_run_summary(
+                n_files=0,
+                total_size_bytes=0,
+                dataset_source="none",
+                estimate=None,
+                validation_passed=False,
+            )
+        return
+
+    if dry_run:
+        if input_dataset:
+            total_size_bytes = input_dataset_response.get("total_size") or 0
+            n_files = len(input_dataset_response.get("adjusted_context") or {})
+            dataset_source = "existing"
+        elif inputs:
+            file_sizes = file_sizes_in_bytes(all_files)
+            total_size_bytes = sum(file_sizes.values())
+            n_files = len(all_files)
+            dataset_source = "upload"
+        else:
+            total_size_bytes = 0
+            n_files = 0
+            dataset_source = "none"
+
+        estimate = api_client.get(
+            "/azure_prices/estimate",
+            params={"n_cores": n_cores, "ram": ram, "limit": 10}
+        )
+
+        _print_dry_run_summary(
+            n_files=n_files,
+            total_size_bytes=total_size_bytes,
+            dataset_source=dataset_source,
+            estimate=estimate,
+            validation_passed=True,
+        )
+        raise typer.Exit(code=0)
 
 
     # STEP 1: Validate the user inputs

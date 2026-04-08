@@ -22,6 +22,17 @@ def detect_input_source_kind(value: str | None) -> str:
     return "unknown"
 
 
+def detect_remote_ref_kind(value: str | None) -> str:
+    if not value:
+        return "none"
+    value = str(value).strip()
+    if extract_google_drive_folder_id(value):
+        return "google_drive"
+    if value.startswith("s3://"):
+        return "s3"
+    return "unknown"
+
+
 def project_input_context(input_root: str, input_context: dict[str, object]) -> dict[str, object]:
     root = input_root.rstrip("/") or "/"
     projected = {}
@@ -107,7 +118,11 @@ def _wait_for_google_callback(expected_state: str, timeout_seconds: int = 300) -
     return str(payload["code"])
 
 
-def import_google_drive_input(folder_url: str) -> dict[str, object]:
+def import_google_drive_input(
+    folder_url: str,
+    *,
+    retain_credential_for_export: bool = False,
+) -> dict[str, object]:
     folder_id = extract_google_drive_folder_id(folder_url)
     if not folder_id:
         console.print("[bold red]Invalid Google Drive folder URL.[/bold red]")
@@ -118,10 +133,11 @@ def import_google_drive_input(folder_url: str) -> dict[str, object]:
         json={
             "provider": "google_drive",
             "direction": "import",
-            "source_ref": {
+            "remote_ref": {
                 "provider": "google_drive",
                 "folder_id": folder_id,
             },
+            "retain_credential_for_export": retain_credential_for_export,
         },
     )
     if not transfer:

@@ -38,6 +38,8 @@ from thoa.core.job_utils import (
 )
 from thoa.core.remote_inputs import (
     detect_input_source_kind,
+    detect_remote_ref_kind,
+    extract_google_drive_folder_id,
     import_google_drive_input,
     project_input_context,
 )
@@ -106,6 +108,7 @@ def run_cmd(
     inputs: Optional[List[str]] = None,
     input_source: Optional[str] = None,
     input_dataset: Optional[str] = None,
+    export_to: Optional[str] = None,
     output: Optional[List[str]] = None,
     n_cores: Optional[int] = None,
     ram: Optional[int] = None,
@@ -126,6 +129,26 @@ def run_cmd(
     """Run the job with the given configuration using the Bioconda-based execution environment."""
     
     remote_input_context = None
+    export_remote_ref = None
+
+    if export_to:
+        export_kind = detect_remote_ref_kind(export_to)
+        if export_kind == "s3":
+            console.print("[bold red]Error:[/bold red] S3 exports are not implemented yet.")
+            raise typer.Exit(code=1)
+        if export_kind != "google_drive":
+            console.print("[bold red]Error:[/bold red] Unsupported --export-to value.")
+            raise typer.Exit(code=1)
+
+        export_folder_id = extract_google_drive_folder_id(export_to)
+        if not export_folder_id:
+            console.print("[bold red]Error:[/bold red] Invalid Google Drive folder URL for --export-to.")
+            raise typer.Exit(code=1)
+
+        export_remote_ref = {
+            "provider": "google_drive",
+            "folder_id": export_folder_id,
+        }
 
     if input_source:
         source_kind = detect_input_source_kind(input_source)
@@ -147,7 +170,10 @@ def run_cmd(
             )
             raise typer.Exit(code=1)
 
-        imported_input = import_google_drive_input(input_source)
+        imported_input = import_google_drive_input(
+            input_source,
+            retain_credential_for_export=bool(export_remote_ref),
+        )
         input_root = os.path.abspath(str(inputs[0]))
         input_dataset = str(imported_input["dataset_public_id"])
         remote_input_context = project_input_context(

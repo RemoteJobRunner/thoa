@@ -22,6 +22,10 @@ def run_cmd(
         None, "--input-source", help="Remote input source such as a Google Drive folder URL. "
         "When set, --input is treated as the desired mounted path inside the job.",
     ),
+    export_to: Optional[str] = typer.Option(
+        None, "--export-to", help="Remote export destination such as a Google Drive folder URL. "
+        "The finished output dataset will be exported there after the run completes.",
+    ),
     input_dataset: Optional[str] = typer.Option(
         None, "--input-dataset", help="Minihash identifying an existing input dataset (bypasses file upload)."
     ),
@@ -91,6 +95,7 @@ def run_cmd(
         inputs=inputs,
         input_dataset=input_dataset,
         input_source=input_source,
+        export_to=export_to,
         output=output,
         n_cores=n_cores,
         ram=ram,

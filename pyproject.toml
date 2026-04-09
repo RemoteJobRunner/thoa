@@ -21,5 +21,10 @@ dependencies = [
 requires = ["poetry-core>=2.0.0,<3.0.0"]
 build-backend = "poetry.core.masonry.api"
 
+[tool.pytest.ini_options]
+markers = [
+    "slow: tests that submit real jobs (take minutes, uses azure)",
+]
+
 [tool.poetry.scripts]
 thoa = "thoa.entrypoint:main"

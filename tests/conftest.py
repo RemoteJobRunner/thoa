@@ -2,8 +2,9 @@
 conftest.py for integration tests against staging.
 
 Requires env vars:
-  THOA_API_URL  - e.g. https://test-api.thoa.io
-  THOA_API_KEY  - valid API key for that instance
+  THOA_STAGING_API_URL  - e.g. https://test-api.thoa.io
+  THOA_STAGING_API_KEY  - valid API key for that instance
+Falls back to THOA_API_URL / THOA_API_KEY if staging vars are not set.
 """
 
 import os

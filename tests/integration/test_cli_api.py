@@ -1,6 +1,6 @@
 """
 Integration tests for CLI commands against staging backend.
-Requires THOA_API_URL and THOA_API_KEY env vars.
+Requires THOA_STAGING_API_URL and THOA_STAGING_API_KEY env vars (or THOA_API_URL/THOA_API_KEY as fallback).
 """
 
 import pytest

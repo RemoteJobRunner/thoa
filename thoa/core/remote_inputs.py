@@ -122,6 +122,7 @@ def import_google_drive_input(
     folder_url: str,
     *,
     retain_credential_for_export: bool = False,
+    defer_execution: bool = False,
 ) -> dict[str, object]:
     folder_id = extract_google_drive_folder_id(folder_url)
     if not folder_id:
@@ -183,6 +184,13 @@ def import_google_drive_input(
             f"[green]Google Drive manifest ready:[/green] "
             f"{manifest['total_items']} items, {manifest['total_bytes']} bytes"
         )
+
+    if defer_execution:
+        return {
+            "transfer_public_id": transfer_id,
+            "status": manifest_status.get("status"),
+            "manifest": manifest,
+        }
 
     start_status = api_client.post(f"/data-transfers/{transfer_id}/start")
     if not start_status:

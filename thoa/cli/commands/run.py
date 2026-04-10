@@ -130,6 +130,8 @@ def run_cmd(
     
     remote_input_context = None
     export_remote_ref = None
+    retained_import_transfer_public_id = None
+    export_transfer_public_id = None
 
     if export_to:
         export_kind = detect_remote_ref_kind(export_to)
@@ -174,6 +176,7 @@ def run_cmd(
             input_source,
             retain_credential_for_export=bool(export_remote_ref),
         )
+        retained_import_transfer_public_id = str(imported_input["transfer_public_id"])
         input_root = os.path.abspath(str(inputs[0]))
         input_dataset = str(imported_input["dataset_public_id"])
         remote_input_context = project_input_context(
@@ -182,6 +185,20 @@ def run_cmd(
         )
         inputs = []
         use_existing_input_dataset = True
+
+        if export_remote_ref:
+            export_transfer = api_client.post(
+                "/data-transfers",
+                json={
+                    "provider": "google_drive",
+                    "direction": "export",
+                    "remote_ref": export_remote_ref,
+                    "credential_transfer_public_id": retained_import_transfer_public_id,
+                },
+            )
+            if not export_transfer:
+                raise typer.Exit(code=1)
+            export_transfer_public_id = str(export_transfer["public_id"])
 
     if input_dataset and inputs and not input_source:
         console.print(
@@ -325,6 +342,14 @@ def run_cmd(
             f"/jobs/{job_response['public_id']}",
             json=job_update_payload,
         )
+
+        if export_transfer_public_id:
+            attach_export_transfer = api_client.post(
+                f"/data-transfers/{export_transfer_public_id}/attach-job",
+                json={"job_public_id": updated_job_response["public_id"]},
+            )
+            if not attach_export_transfer:
+                raise typer.Exit(code=1)
 
         # print(f"Job started successfully. View at: {job_response.get("public_id")}")
         console.print(

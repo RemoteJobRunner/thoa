@@ -10,7 +10,7 @@ source venv/bin/activate
 pip install poetry==2.3.2
 pip install
 ```
-### 2) Create API key
+### 2) Create [DEV] API key 
 Go to `http://localhost:${FRONTEND_PORT}/workbench/api_keys`
 
 and add it into `.bashrc` for
@@ -22,7 +22,20 @@ echo 'export THOA_API_KEY="generated_api_key_here"' >> ~/.bashrc
 ```bash
 echo 'export THOA_API_URL="http://localhost:${FRONTEND_PORT}"' >> ~/.bashrc
 ````
-### 3) Refresh console:
+### 3) Create [STAGING] API key:
+Go to `https://test.thoa.io/`
+
+and add it into `.bashrc` for
+- `THOA_STAGING_API_KEY`:
+```bash
+echo 'export THOA_STAGING_API_KEY="generated_api_key_here"' >> ~/.bashrc
+````
+- `THOA_STAGING_API_URL`:
+```bash
+echo 'export THOA_STAGING_API_URL="https://test-api.thoa.io"' >> ~/.bashrc
+````
+
+### 4) Refresh console:
 ```bash
 source ~/.bashrc
 ```
@@ -36,20 +49,17 @@ source venv/bin/activate
 ```
 
 ## Running tests
-### 1) Install test dependencies
-
+### 1) Activate and use it
 ```bash
 cd ~/thoa
 source thoa/venv/bin/activate
-pip install pytest
 ```
 
 ### 2) Run tests
-
 ```bash
-#all
-pytest tests/ -v
-
-#Intergation CLI
-pytest tests/integration/test_cli_api.py -v
+make test-unit          # unit tests only
+make test-int           # integration tests, no real jobs
+make test-slow          # real job submission tests
+make test-night         # integration + slow
+make tests               # everything
 ```

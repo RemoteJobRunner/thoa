@@ -412,6 +412,18 @@ def run_cmd(
             ]:
                 time.sleep(4)
 
+        if run_async:
+            console.print(Panel(
+                f"[bold green]Job submitted successfully![/bold green]\n\n"
+                f"[label]Job ID:[/label]   [value]{job_response['public_id']}[/value]\n"
+                f"[label]Status:[/label]   [value]{current_job_status(updated_job_response['public_id'])}[/value]\n"
+                f"[label]View:[/label]     [value]{settings.THOA_UI_URL}/workbench/jobs/{job_response['public_id']}[/value]",
+                title="[title]Job Submitted (async)[/title]",
+                expand=False,
+                border_style="green"
+            ))
+            return
+
         with console.status(f"Validating your environment", spinner="dots12"):
             while current_job_status(updated_job_response['public_id']) == "validating":
                 time.sleep(4)
@@ -454,6 +466,18 @@ def run_cmd(
         if current_job_status(updated_job_response['public_id']) == "failed_validation":
             _print_env_build_failure(updated_job_response['public_id'])
             raise typer.Exit(code=1)
+
+    if run_async:
+        console.print(Panel(
+            f"[bold green]Job submitted successfully![/bold green]\n\n"
+            f"[label]Job ID:[/label]   [value]{job_response['public_id']}[/value]\n"
+            f"[label]Status:[/label]   [value]{current_job_status(updated_job_response['public_id'])}[/value]\n"
+            f"[label]View:[/label]     [value]{settings.THOA_UI_URL}/workbench/jobs/{job_response['public_id']}[/value]",
+            title="[title]Job Submitted (async)[/title]",
+            expand=False,
+            border_style="green"
+        ))
+        return
 
     # STEP 9: Poll until the VM has been provisioned
     with console.status(f"Spawning a Virtual Machine for your job", spinner="dots12"):

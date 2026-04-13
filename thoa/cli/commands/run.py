@@ -414,9 +414,10 @@ def run_cmd(
         if run_async:
             console.print(Panel(
                 f"[bold green]Job submitted successfully![/bold green]\n\n"
-                f"[label]Job ID:[/label]   [value]{job_response['public_id']}[/value]\n"
-                f"[label]Status:[/label]   [value]{current_job_status(updated_job_response['public_id'])}[/value]\n"
-                f"[label]View:[/label]     [value]{settings.THOA_UI_URL}/workbench/jobs/{job_response['public_id']}[/value]",
+                f"[label]Job ID:[/label]    [value]{job_response['public_id']}[/value]\n"
+                f"[label]Status:[/label]    [value]{current_job_status(updated_job_response['public_id'])}[/value]\n"
+                f"[label]View:[/label]      [value]{settings.THOA_UI_URL}/workbench/jobs/{job_response['public_id']}[/value]\n"
+                f"[label]Attach:[/label]    [value]thoa jobs attach {job_response['public_id']}[/value]",
                 title="[title]Job Submitted (async)[/title]",
                 expand=False,
                 border_style="green"

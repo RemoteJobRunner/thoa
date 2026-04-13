@@ -162,3 +162,63 @@ def test_run_async_no_inputs_exits_before_provisioning():
         f"Job ID should appear in output, got: {result.output}"
     assert result.exit_code == 0, \
         f"Expected exit_code 0, got {result.exit_code}. Output: {result.output}"
+
+
+def test_attach_completed_job_exits_with_message():
+    mock_api = MagicMock()
+    mock_api.get.return_value = [{"status": "completed", "name": "test-job"}]
+
+    with patch("thoa.core.job_utils.api_client", mock_api), \
+         patch("thoa.core.api_utils.api_client", mock_api):
+
+        result = runner.invoke(app, ["jobs", "attach", "abc-123-def"])
+
+    assert result.exit_code == 0, \
+        f"Expected exit_code 0, got {result.exit_code}. Output: {result.output}"
+    assert "already" in result.output.lower(), \
+        f"Expected 'already' in output, got: {result.output}"
+    assert "completed" in result.output.lower(), \
+        f"Expected 'completed' in output, got: {result.output}"
+    assert mock_api.stream_logs_blocking.call_count == 0, \
+        "stream_logs_blocking should not be called for a completed job"
+
+
+def test_attach_running_job_streams_logs():
+    mock_api = MagicMock()
+    mock_api.get.return_value = [{"status": "running", "name": "test-job"}]
+
+    with patch("thoa.core.job_utils.api_client", mock_api), \
+         patch("thoa.core.api_utils.api_client", mock_api), \
+         patch("thoa.cli.commands.jobs.api_client", mock_api):
+
+        result = runner.invoke(app, ["jobs", "attach", "abc-123-def"])
+
+    assert result.exit_code == 0, \
+        f"Expected exit_code 0, got {result.exit_code}. Output: {result.output}"
+    mock_api.stream_logs_blocking.assert_called_once_with("abc-123-def", from_id="0-0")
+
+
+def test_attach_provisioning_job_waits_then_streams():
+    mock_api = MagicMock()
+    status_sequence = [
+        [{"status": "provisioning", "name": "test-job"}],
+        [{"status": "provisioning", "name": "test-job"}],
+        [{"status": "running", "name": "test-job"}],
+    ]
+    mock_api.get.side_effect = status_sequence
+
+    mock_time = MagicMock()
+
+    with patch("thoa.core.job_utils.api_client", mock_api), \
+         patch("thoa.core.api_utils.api_client", mock_api), \
+         patch("thoa.cli.commands.jobs.api_client", mock_api), \
+         patch("thoa.cli.commands.jobs.time", mock_time):
+
+        result = runner.invoke(app, ["jobs", "attach", "abc-123-def"])
+
+    assert result.exit_code == 0, \
+        f"Expected exit_code 0, got {result.exit_code}. Output: {result.output}"
+    assert mock_api.stream_logs_blocking.call_count == 1, \
+        "stream_logs_blocking should be called exactly once"
+    assert mock_time.sleep.call_count >= 1, \
+        "time.sleep should be called at least once while waiting"

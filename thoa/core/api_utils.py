@@ -66,7 +66,16 @@ class ApiClient:
                 rprint(f"[green]Response:[/green] {response.json()}")
             return response.json()
         else:
-            ErrorReadouts(response.status_code, response.json().get("detail")).readout()
+            detail = None
+            try:
+                payload = response.json()
+                if isinstance(payload, dict):
+                    detail = payload.get("detail")
+                else:
+                    detail = str(payload)
+            except Exception:
+                detail = response.text.strip() or None
+            ErrorReadouts(response.status_code, detail).readout()
             return
 
     def get(self, path: str, **kwargs):

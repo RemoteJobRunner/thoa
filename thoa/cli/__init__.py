@@ -17,14 +17,9 @@ app.add_typer(envs_app, name="envs", help="Environment-related commands")
 
 @app.command("run")
 def run_cmd(
-    inputs: Optional[List[Path]] = typer.Option(
-        [], "--input", "-i", help="Input files or directories to send to the job. "
-        "Use multiple --input flags or specify globs like path/*. If omitted, no input files will be uploaded.",
-        resolve_path=False,
-        exists=True,
-        readable=True,
-        dir_okay=True,
-        file_okay=True
+    inputs: Optional[List[str]] = typer.Option(
+        [], "--input", "-i", help="Input path. Local paths keep their current behavior. "
+        "Google Drive input is specified as <gdrive_url>::<mount_path>.",
     ),
     input_dataset: Optional[str] = typer.Option(
         None, "--input-dataset", help="Minihash identifying an existing input dataset (bypasses file upload)."
@@ -70,7 +65,7 @@ def run_cmd(
         help="Local directory to download output files after job completion."
     ),
     run_async: bool = typer.Option(
-        False, "--run-async", help="If set, stream VM outputs to terminal and keep session active."
+        False, "--run-async", help="Submit the job and exit after upload completes. Monitor progress at thoa.io."
     ),
     job_name: Optional[str] = typer.Option(
         None, "--job-name", help="Custom name for the job. Defaults to a randomly generated ID."

@@ -171,7 +171,8 @@ def file_sizes_in_bytes(paths, follow_symlinks=True):
 def current_job_status(job_id: str):
     """Fetch the current status of a job by its public ID."""
     
-    response = api_client.get(f"/jobs?public_id={job_id}")[0] if api_client.get(f"/jobs?public_id={job_id}") else {}
+    results = api_client.get(f"/jobs?public_id={job_id}")
+    response = results[0] if results else {}
     
     if response is None:
         raise ValueError(f"Job with ID {job_id} not found or invalid.")

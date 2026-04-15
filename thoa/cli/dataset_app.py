@@ -27,7 +27,7 @@ def list_(
             )
         )
 
-        raise typer.Exit()
+        raise typer.Exit(1)
     
     list_datasets(n, sort_by, not descending)
     

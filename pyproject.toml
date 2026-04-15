@@ -14,12 +14,18 @@ dependencies = [
     "typing-extensions (>=4.14.1,<5.0.0)",
     "httpx (>=0.28.1,<0.29.0)",
     "azure-storage-blob (>=12.26.0,<13.0.0)",
-    "websockets (>=15.0.1,<16.0.0)"
+    "websockets (>=15.0.1,<16.0.0)",
+    "pyyaml (>=6.0.3,<7.0.0)"
 ]
 
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]
 build-backend = "poetry.core.masonry.api"
+
+[tool.pytest.ini_options]
+markers = [
+    "slow: tests that submit real jobs (take minutes, uses azure)",
+]
 
 [tool.poetry.scripts]
 thoa = "thoa.entrypoint:main"

@@ -70,7 +70,7 @@ def run_cmd(
         help="Local directory to download output files after job completion."
     ),
     run_async: bool = typer.Option(
-        False, "--run-async", help="If set, stream VM outputs to terminal and keep session active."
+        False, "--run-async", help="Submit the job and exit after upload completes. Monitor progress at thoa.io."
     ),
     job_name: Optional[str] = typer.Option(
         None, "--job-name", help="Custom name for the job. Defaults to a randomly generated ID."

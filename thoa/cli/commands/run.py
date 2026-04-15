@@ -36,6 +36,7 @@ from thoa.core.job_utils import (
     max_threads,
     console
 )
+from thoa.core.input_specs import parse_input_spec
 from thoa.core.remote_inputs import (
     detect_input_source_kind,
     import_google_drive_input,
@@ -104,7 +105,6 @@ def _print_dry_run_summary(
 
 def run_cmd(
     inputs: Optional[List[str]] = None,
-    input_source: Optional[str] = None,
     input_dataset: Optional[str] = None,
     output: Optional[List[str]] = None,
     n_cores: Optional[int] = None,
@@ -124,31 +124,54 @@ def run_cmd(
 ):
     
     """Run the job with the given configuration using the Bioconda-based execution environment."""
-    
+
+    # Transitional CLI behavior:
+    # - local --input remains unchanged
+    # - Google Drive input moves from --input-source to --input <url>::<mount_path>
+    # - dataset ids intentionally stay on --input-dataset
+    parsed_inputs = [parse_input_spec(raw) for raw in (inputs or [])]
+    local_specs = [spec for spec in parsed_inputs if spec.kind == "local"]
+    remote_specs = [spec for spec in parsed_inputs if spec.kind == "google_drive"]
+    unknown_specs = [spec for spec in parsed_inputs if spec.kind == "unknown"]
+
+    if unknown_specs:
+        console.print(
+            "[bold red]Error:[/bold red] Unsupported --input value(s): "
+            + ", ".join(spec.raw for spec in unknown_specs)
+        )
+        raise typer.Exit(code=1)
+    if len(remote_specs) > 1:
+        console.print("[bold red]Error:[/bold red] Multiple remote inputs are not supported yet.")
+        raise typer.Exit(code=1)
+    if remote_specs and local_specs:
+        console.print("[bold red]Error:[/bold red] Cannot combine local and remote --input values yet.")
+        raise typer.Exit(code=1)
+
     remote_input_context = None
 
-    if input_source:
-        source_kind = detect_input_source_kind(input_source)
+    if remote_specs:
+        remote_spec = remote_specs[0]
+        source_kind = detect_input_source_kind(remote_spec.source)
         if source_kind == "s3":
             console.print("[bold red]Error:[/bold red] S3 inputs are not implemented yet.")
             raise typer.Exit(code=1)
         if source_kind != "google_drive":
-            console.print("[bold red]Error:[/bold red] Unsupported --input-source value.")
+            console.print("[bold red]Error:[/bold red] Unsupported remote --input value.")
             raise typer.Exit(code=1)
         if input_dataset:
             console.print(
-                "[bold red]Error:[/bold red] Cannot combine --input-dataset with --input-source."
+                "[bold red]Error:[/bold red] Cannot combine --input-dataset with remote --input."
             )
             raise typer.Exit(code=1)
-        if not inputs or len(inputs) != 1:
+        if not remote_spec.mount_path:
             console.print(
-                "[bold red]Error:[/bold red] --input-source requires exactly one --input path "
-                "to act as the mounted execution path."
+                "[bold red]Error:[/bold red] Google Drive input requires "
+                "<gdrive_url>::<mount_path>."
             )
             raise typer.Exit(code=1)
 
-        imported_input = import_google_drive_input(input_source)
-        input_root = os.path.abspath(str(inputs[0]))
+        imported_input = import_google_drive_input(remote_spec.source)
+        input_root = os.path.abspath(str(remote_spec.mount_path))
         input_dataset = str(imported_input["dataset_public_id"])
         remote_input_context = project_input_context(
             input_root,
@@ -157,7 +180,10 @@ def run_cmd(
         inputs = []
         use_existing_input_dataset = True
 
-    if input_dataset and inputs and not input_source:
+    # Local inputs intentionally keep the old behavior in this PR.
+    inputs = [spec.source for spec in local_specs]
+
+    if input_dataset and inputs:
         console.print(
             "[bold red]Error:[/bold red] Cannot specify both --input and --input-dataset options at the same time. Please choose one or the other."
         )

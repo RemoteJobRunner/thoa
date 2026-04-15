@@ -25,13 +25,15 @@ jobs:
           echo "$HOME/.local/bin" >> $GITHUB_PATH
 
       - name: Install dependencies
-        run: poetry install
+        run: |
+          poetry install
+          poetry run pip install pytest
 
       - name: Run integration tests
         env:
           THOA_STAGING_API_URL: https://test-api.thoa.io
           THOA_STAGING_API_KEY: ${{ secrets.THOA_STAGING_API_KEY }}
-        run: poetry run pytest tests/integration/ -v --tb=short 2>&1
+        run: poetry run pytest tests/integration/ -v --tb=short
 
       - name: Summary
         if: always()

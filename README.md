@@ -1,36 +1,44 @@
-# thoa
-Thoa CLI for submitting jobs to Thoa platform
+# Thoa CLI
 
-## Install local virtual environment
-### 1) Install dependencies
-```bash
-cd ~/thoa/thoa
-python3 -m venv venv
-source venv/bin/activate
-pip install poetry==2.3.2
-pip install
-```
-### 2) Create API key
-Go to `http://localhost:${FRONTEND_PORT}/workbench/api_keys`
+Command-line interface for running bioinformatics workflows on the [Thoa](https://thoa.io) cloud platform.
 
-and add it into `.bashrc` for
-- `THOA_API_KEY`:
+Submit Snakemake and Nextflow pipelines, manage datasets, and monitor jobs — without managing infrastructure.
+
+## Installation
+
 ```bash
-echo 'export THOA_API_KEY="generated_api_key_here"' >> ~/.bashrc
-````
-- `THOA_API_URL`:
-```bash
-echo 'export THOA_API_URL="http://localhost:${FRONTEND_PORT}"' >> ~/.bashrc
-````
-### 3) Refresh console:
-```bash
-source ~/.bashrc
+pip install thoa
 ```
 
-## Re-use CLI with a local virtual environment
-### Activate venv and use it
+## Quick Start
+
+Create your API key at [thoa.io/workbench/api_keys](https://thoa.io/workbench/api_keys), then:
+
 ```bash
-cd ~/thoa/thoa
-python3 -m venv venv
-source venv/bin/activate
+export THOA_API_KEY="your_api_key"
+
+thoa run \
+  --cmd "bwa mem ref.fa reads.fq > aligned.sam" \
+  --tools "bwa,samtools" \
+  --n-cores 16 \
+  --ram 64 \
+  --input ./data \
+  --output ./results
 ```
+
+## Commands
+
+| Command | Description |
+|---------|-------------|
+| `thoa run` | Submit a remote job |
+| `thoa dataset list` | List available datasets |
+| `thoa dataset download` | Download a dataset |
+| `thoa jobs list` | List recent jobs |
+| `thoa tools` | Show available Bioconda/conda-forge packages |
+
+## Documentation
+
+- [Quickstart](https://thoa.io/docs/quickstart) — install and run your first job
+- [CLI Guide](https://thoa.io/docs/cli) — full CLI reference
+- [Cookbook](https://thoa.io/cookbook) — reproducible analysis recipes
+- [Full Docs](https://thoa.io/docs) — platform overview and concepts

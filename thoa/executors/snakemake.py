@@ -16,6 +16,7 @@ from snakemake_interface_executor_plugins.settings import (
 )
 
 from thoa.config import settings as thoa_settings
+from thoa.core.job_status import JobStatus
 
 
 def _jsonable(value: Any) -> Any:
@@ -563,14 +564,14 @@ class Executor(RemoteExecutor):
 
             thoa_status = str(job_rows[0].get("status"))
 
-            if thoa_status in {"completed", "archived"}:
+            if thoa_status in {JobStatus.COMPLETED, JobStatus.ARCHIVED}:
                 self.report_job_success(active_job)
             elif thoa_status in {
-                "failed_upload",
-                "failed_validation",
-                "failed_provisioning",
-                "failed_execution",
-                "cancelled",
+                JobStatus.FAILED_UPLOAD,
+                JobStatus.FAILED_VALIDATION,
+                JobStatus.FAILED_PROVISIONING,
+                JobStatus.FAILED_EXECUTION,
+                JobStatus.CANCELLED,
                 "submission_failed",
             }:
                 self._saw_job_error = True
@@ -586,7 +587,7 @@ class Executor(RemoteExecutor):
         for active_job in active_jobs:
             thoa_job_id = str(active_job.external_jobid)
             try:
-                self._request("PUT", f"/jobs/{thoa_job_id}", json={"status": "cancelled"})
+                self._request("PUT", f"/jobs/{thoa_job_id}", json={"status": JobStatus.CANCELLED})
             except Exception as e:
                 self.logger.warning(f"Failed to mark THOA job {thoa_job_id} as cancelled: {e}")
 

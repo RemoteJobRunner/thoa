@@ -37,6 +37,7 @@ from thoa.core.job_utils import (
     console
 )
 from thoa.core.remote_inputs import (
+    authorize_google_drive_transfer,
     detect_input_source_kind,
     detect_remote_ref_kind,
     extract_google_drive_folder_id,
@@ -185,19 +186,34 @@ def run_cmd(
         inputs = []
         use_existing_input_dataset = True
 
-        if export_remote_ref:
-            export_transfer = api_client.post(
-                "/data-transfers",
-                json={
-                    "provider": "google_drive",
-                    "direction": "export",
-                    "remote_ref": export_remote_ref,
-                    "credential_transfer_public_id": import_transfer_public_id,
-                },
-            )
-            if not export_transfer:
+    if export_remote_ref:
+        export_payload = {
+            "provider": "google_drive",
+            "direction": "export",
+            "remote_ref": export_remote_ref,
+        }
+        if import_transfer_public_id:
+            export_payload["credential_transfer_public_id"] = import_transfer_public_id
+
+        export_transfer = api_client.post(
+            "/data-transfers",
+            json=export_payload,
+        )
+        if not export_transfer:
+            raise typer.Exit(code=1)
+
+        export_transfer_public_id = str(export_transfer["public_id"])
+
+        if export_transfer.get("status") == "pending_auth":
+            export_status = authorize_google_drive_transfer(export_transfer_public_id)
+            if not export_status:
                 raise typer.Exit(code=1)
-            export_transfer_public_id = str(export_transfer["public_id"])
+
+            export_transfer = api_client.get(f"/data-transfers/{export_transfer_public_id}")
+            if not export_transfer or export_transfer.get("status") != "authorized":
+                console.print("[bold red]Error:[/bold red] Google Drive export authorization failed.")
+                raise typer.Exit(code=1)
+
 
     if input_dataset and inputs and not input_source:
         console.print(

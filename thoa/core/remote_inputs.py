@@ -118,6 +118,39 @@ def _wait_for_google_callback(expected_state: str, timeout_seconds: int = 300) -
     return str(payload["code"])
 
 
+def authorize_google_drive_transfer(transfer_id: str) -> dict[str, object]:
+    redirect_uri = google_drive_redirect_uri()
+
+    auth_start = api_client.post(
+        f"/data-transfers/{transfer_id}/google-drive/auth/start",
+        json={"redirect_uri": redirect_uri},
+    )
+    if not auth_start:
+        raise typer.Exit(code=1)
+
+    auth_url = auth_start["auth_url"]
+    state = auth_start["state"]
+
+    console.print("[bold cyan]Starting Google Drive authorization...[/bold cyan]")
+    console.print(f"[dim]{auth_url}[/dim]")
+    if settings.THOA_GDRIVE_OPEN_BROWSER:
+        webbrowser.open(auth_url)
+
+    code = _wait_for_google_callback(expected_state=state)
+
+    auth_complete = api_client.post(
+        f"/data-transfers/{transfer_id}/google-drive/auth/complete",
+        json={
+            "code": code,
+            "redirect_uri": redirect_uri,
+        },
+    )
+    if not auth_complete:
+        raise typer.Exit(code=1)
+
+    return auth_complete
+
+
 def import_google_drive_input(
     folder_url: str,
     *,
@@ -145,32 +178,7 @@ def import_google_drive_input(
         raise typer.Exit(code=1)
 
     transfer_id = transfer["public_id"]
-    redirect_uri = google_drive_redirect_uri()
-
-    auth_start = api_client.post(
-        f"/data-transfers/{transfer_id}/google-drive/auth/start",
-        json={"redirect_uri": redirect_uri},
-    )
-    if not auth_start:
-        raise typer.Exit(code=1)
-
-    auth_url = auth_start["auth_url"]
-    state = auth_start["state"]
-
-    console.print("[bold cyan]Starting Google Drive authorization...[/bold cyan]")
-    console.print(f"[dim]{auth_url}[/dim]")
-    if settings.THOA_GDRIVE_OPEN_BROWSER:
-        webbrowser.open(auth_url)
-
-    code = _wait_for_google_callback(expected_state=state)
-
-    auth_complete = api_client.post(
-        f"/data-transfers/{transfer_id}/google-drive/auth/complete",
-        json={
-            "code": code,
-            "redirect_uri": redirect_uri,
-        },
-    )
+    auth_complete = authorize_google_drive_transfer(transfer_id)
     if not auth_complete:
         raise typer.Exit(code=1)
 

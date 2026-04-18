@@ -52,3 +52,18 @@ def attach(
             return
 
     api_client.stream_logs_blocking(job_id, from_id="0-0")
+
+
+@app.command("cancel")
+def cancel(
+    job_id: str = typer.Argument(..., help="Public ID of the job to cancel."),
+):
+    """Cancel a running or in-progress job."""
+    response = api_client.post(f"/jobs/{job_id}/cancel")
+
+    if response and response.get("status") == "cancelled":
+        console.print(f"Job [cyan]{job_id}[/cyan] [bold red]cancelled[/bold red].")
+    elif response is None:
+        pass
+    else:
+        console.print(f"[red]Failed to cancel job:[/red] {response}")

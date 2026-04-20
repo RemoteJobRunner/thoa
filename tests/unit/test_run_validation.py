@@ -222,3 +222,26 @@ def test_attach_provisioning_job_waits_then_streams():
         "stream_logs_blocking should be called exactly once"
     assert mock_time.sleep.call_count >= 1, \
         "time.sleep should be called at least once while waiting"
+
+
+def test_cancel_job_success():
+    mock_api = MagicMock()
+    mock_api.post.return_value = {"status": "cancelled", "job_id": "abc-123-def"}
+
+    with patch("thoa.cli.commands.jobs.api_client", mock_api):
+        result = runner.invoke(app, ["jobs", "cancel", "abc-123-def"])
+
+    assert result.exit_code == 0
+    assert "cancelled" in result.output.lower()
+    mock_api.post.assert_called_once_with("/jobs/abc-123-def/cancel")
+
+
+def test_cancel_job_already_completed():
+    mock_api = MagicMock()
+    mock_api.post.return_value = None
+
+    with patch("thoa.cli.commands.jobs.api_client", mock_api):
+        result = runner.invoke(app, ["jobs", "cancel", "abc-123-def"])
+
+    assert result.exit_code == 0
+    mock_api.post.assert_called_once_with("/jobs/abc-123-def/cancel")

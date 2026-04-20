@@ -1,6 +1,6 @@
 import typer
 import time
-from thoa.core.job_utils import list_jobs, current_job_status
+from thoa.core.job_utils import list_jobs, current_job_status, print_job_detail
 from thoa.core.job_status import JobStatus, TERMINAL_STATUSES
 from thoa.core.api_utils import api_client
 from rich.console import Console
@@ -28,6 +28,14 @@ def list_(
         sort_by=sort_by,
         ascending=ascending,
     )
+
+
+@app.command("get")
+def get(
+    job_id: str = typer.Argument(..., help="Public ID of the job to inspect."),
+):
+    """Show full details for a job."""
+    print_job_detail(job_id)
 
 
 @app.command("attach")

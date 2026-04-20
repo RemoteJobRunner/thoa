@@ -319,6 +319,41 @@ def _fmt_job_timestamp(ts: str) -> str:
     return dt.strftime("%b %d %Y, %H:%M")
 
 
+def _fmt_timestamp_detail(ts: str) -> str:
+    dt = _parse_job_timestamp(ts)
+    if not dt:
+        return ts or "—"
+    return dt.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _fmt_duration(started_at: str, finished_at: str) -> str:
+    start = _parse_job_timestamp(started_at)
+    end = _parse_job_timestamp(finished_at)
+    if not start or not end:
+        return "—"
+    total = int((end - start).total_seconds())
+    mins, secs = divmod(total, 60)
+    hours, mins = divmod(mins, 60)
+    if hours:
+        return f"{hours}h {mins}m {secs}s"
+    if mins:
+        return f"{mins} min {secs} sec"
+    return f"{secs} sec"
+
+
+def _fmt_size(bytes_val) -> str:
+    if bytes_val is None:
+        return "—"
+    b = int(bytes_val)
+    if b >= 1024 ** 3:
+        return f"{b / (1024 ** 3):.1f} GB"
+    if b >= 1024 ** 2:
+        return f"{b / (1024 ** 2):.1f} MB"
+    if b >= 1024:
+        return f"{b / 1024:.1f} KB"
+    return f"{b} B"
+
+
 # Main job listing
 def list_jobs(
     limit: int = None,
@@ -378,3 +413,91 @@ def list_jobs(
 
     except Exception as e:
         console.print(Panel(f"[red]Error listing jobs:[/red] {e}", title="Error", style="bold red"))
+
+
+def print_job_detail(job_id: str):
+    with console.status("[bold cyan]Fetching job details...[/bold cyan]", spinner="dots12"):
+        detail = api_client.get(f"/jobs/{job_id}/detail")
+        logs = api_client.get(f"/jobs/{job_id}/log-entries", params={"limit": 500})
+
+    if not detail:
+        return
+
+    name = detail.get("name") or str(detail.get("public_id", ""))[:8]
+    console.print(f"\n[bold cyan]{name}[/bold cyan]\n")
+
+    # Job Info
+    started = str(detail.get("started_at") or "")
+    finished = str(detail.get("finished_at") or "")
+
+    info = Table(show_header=False, box=None, expand=False, padding=(0, 1))
+    info.add_column(style="label", no_wrap=True)
+    info.add_column(style="value")
+    info.add_row("Name", name)
+    info.add_row("Job ID", str(detail.get("public_id", "")))
+    info.add_row("Started", _fmt_timestamp_detail(started))
+    info.add_row("Finished", _fmt_timestamp_detail(finished))
+    info.add_row("Duration", _fmt_duration(started, finished))
+    info.add_row("CPU", str(detail.get("requested_cpu") or "—"))
+    info.add_row("RAM", f"{detail.get('requested_ram') or '—'} GB")
+    info.add_row("Disk", f"{detail.get('requested_disk_space') or '—'} GB")
+    info.add_row("Credits used", str(detail.get("credits_debited") or "—"))
+    info.add_row("Status", str(detail.get("status") or "—"))
+    console.print(Panel(info, title="[bold]Job Info[/bold]", border_style="cyan"))
+
+    # Input Dataset
+    in_ds = detail.get("input_dataset")
+    if in_ds:
+        t = Table(show_header=False, box=None, expand=False, padding=(0, 1))
+        t.add_column(style="label", no_wrap=True)
+        t.add_column(style="value")
+        t.add_row("ID", str(in_ds.get("public_id", ""))[:8])
+        t.add_row("Created", _fmt_timestamp_detail(str(in_ds.get("created_at") or "")))
+        t.add_row("Files", str(in_ds.get("number_of_files") or "—"))
+        t.add_row("Size", _fmt_size(in_ds.get("total_size")))
+        console.print(Panel(t, title="[bold]Input Dataset[/bold]", border_style="blue"))
+
+    # Output Dataset
+    out_ds = detail.get("output_dataset")
+    if out_ds:
+        t = Table(show_header=False, box=None, expand=False, padding=(0, 1))
+        t.add_column(style="label", no_wrap=True)
+        t.add_column(style="value")
+        t.add_row("ID", str(out_ds.get("public_id", ""))[:8])
+        t.add_row("Created", _fmt_timestamp_detail(str(out_ds.get("created_at") or "")))
+        t.add_row("Files", str(out_ds.get("number_of_files") or "—"))
+        t.add_row("Size", _fmt_size(out_ds.get("total_size")))
+        console.print(Panel(t, title="[bold]Output Dataset[/bold]", border_style="blue"))
+
+    # Environment
+    env = detail.get("environment")
+    if env:
+        t = Table(show_header=False, box=None, expand=False, padding=(0, 1))
+        t.add_column(style="label", no_wrap=True)
+        t.add_column(style="value")
+        env_id = str(env.get("public_id") or "")
+        t.add_row("ID", (env_id[:8] + "…") if len(env_id) >= 8 else env_id)
+        t.add_row("Type", str(env.get("env_type") or "—"))
+        t.add_row("Status", str(env.get("env_status") or "—"))
+        console.print(Panel(t, title="[bold]Environment[/bold]", border_style="green"))
+
+    # Logs & Run Info
+    run_cmd = detail.get("run_command") or "—"
+    env_string = (env.get("env_string") or "—") if env else "—"
+
+    if logs:
+        from rich.markup import escape
+        log_lines = [
+            f"{_fmt_timestamp_detail(str(e.get('timestamp', '')))} \[{e.get('message_type', '')}] {escape(e.get('message') or '')}"
+            for e in logs
+        ]
+        logs_text = "\n".join(log_lines)
+    else:
+        logs_text = "—"
+
+    run_info = (
+        f"[label]Run command:[/label]\n{run_cmd}\n\n"
+        f"[label]Environment.yml:[/label]\n{env_string}\n\n"
+        f"[label]Job Execution Logs:[/label]\n{logs_text}"
+    )
+    console.print(Panel(run_info, title="[bold]Logs & Run Info[/bold]", border_style="yellow"))

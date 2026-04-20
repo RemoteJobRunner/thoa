@@ -8,7 +8,7 @@ from rich.panel import Panel
 
 console = Console()
 
-app = typer.Typer(help="Job-related commands")
+app = typer.Typer(help="Job-related commands", context_settings={"help_option_names": ["-h", "--help"]})
 
 
 @app.command("list")

@@ -5,22 +5,21 @@ from pathlib import Path
 from .dataset_app import app as dataset_app
 from .commands.tools import app as tools_app
 from .commands.jobs import app as jobs_app
+from .commands.envs import app as envs_app
+from thoa.core.job_utils import console
 
 app = typer.Typer(help="THOA CLI tool", add_completion=False)
 app.add_typer(dataset_app, name="dataset", help="Dataset-related commands")
 app.add_typer(tools_app, name="tools")
 app.add_typer(jobs_app, name="jobs")
+app.add_typer(envs_app, name="envs", help="Environment-related commands")
 
 
 @app.command("run")
 def run_cmd(
     inputs: Optional[List[str]] = typer.Option(
-        [], "--input", "-i", help="Local input files or directories to send to the job. "
-        "If omitted, no local input files will be uploaded.",
-    ),
-    input_source: Optional[str] = typer.Option(
-        None, "--input-source", help="Remote input source such as a Google Drive folder URL. "
-        "When set, --input is treated as the desired mounted path inside the job.",
+        [], "--input", "-i", help="Input path. Local paths keep their current behavior. "
+        "Google Drive input is specified as <gdrive_url>::<mount_path>.",
     ),
     export_to: Optional[str] = typer.Option(
         None, "--export-to", help="Remote export destination such as a Google Drive folder URL. "
@@ -53,6 +52,9 @@ def run_cmd(
     env_source: Optional[Path] = typer.Option(
         None, "--env-source", help="Environment specifier (e.g., environment.yml, env-name)."
     ),
+    env_id: Optional[str] = typer.Option(
+        None, "--env-id", help="UUID of an existing environment to reuse (mutually exclusive with --tools and --env-source)."
+    ),
     cmd: str = typer.Option(
         ..., "--cmd", help="The command to run inside the job environment."
     ),
@@ -67,7 +69,7 @@ def run_cmd(
         help="Local directory to download output files after job completion."
     ),
     run_async: bool = typer.Option(
-        False, "--run-async", help="If set, stream VM outputs to terminal and keep session active."
+        False, "--run-async", help="Submit the job and exit after upload completes. Monitor progress at thoa.io."
     ),
     job_name: Optional[str] = typer.Option(
         None, "--job-name", help="Custom name for the job. Defaults to a randomly generated ID."
@@ -83,18 +85,26 @@ def run_cmd(
     ),
 ):
 
-    has_input_data = bool(inputs) or bool(input_dataset) or bool(input_source)
+    has_input_data = bool(inputs) or bool(input_dataset)
 
     """Run the job with the given configuration using the Bioconda-based execution environment."""
-    # Input validation (optional, for runtime enforcement)
-    if not tools and not env_source:
-        typer.echo("Error: Either --tools or --env-source must be specified.", err=True)
+    # Mutual exclusion: exactly one of --tools, --env-source, --env-id must be provided
+    env_options = [("--tools", bool(tools)), ("--env-source", bool(env_source)), ("--env-id", bool(env_id))]
+    provided = [name for name, given in env_options if given]
+    if len(provided) > 1:
+        console.print(
+            f"[bold red]Error:[/bold red] {' and '.join(provided)} are mutually exclusive. Please specify only one of --tools, --env-source, or --env-id."
+        )
+        raise typer.Exit(code=1)
+    if len(provided) == 0:
+        console.print(
+            "[bold red]Error:[/bold red] You must specify exactly one of --tools, --env-source, or --env-id."
+        )
         raise typer.Exit(code=1)
 
     run.run_cmd(
         inputs=inputs,
         input_dataset=input_dataset,
-        input_source=input_source,
         export_to=export_to,
         output=output,
         n_cores=n_cores,
@@ -102,6 +112,7 @@ def run_cmd(
         storage=storage,
         tools=tools,
         env_source=env_source,
+        env_id=env_id,
         cmd=cmd,
         download_path=download_path,
         run_async=run_async,

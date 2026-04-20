@@ -26,7 +26,7 @@ import os
 from thoa.core.job_utils import (
     print_config,
     validate_user_command,
-    collect_files,  
+    collect_files,
     compute_md5_buffered,
     hash_all,
     file_sizes_in_bytes,
@@ -36,6 +36,7 @@ from thoa.core.job_utils import (
     max_threads,
     console
 )
+from thoa.core.input_specs import parse_input_spec
 from thoa.core.remote_inputs import (
     authorize_google_drive_transfer,
     detect_input_source_kind,
@@ -44,6 +45,7 @@ from thoa.core.remote_inputs import (
     import_google_drive_input,
     project_input_context,
 )
+from thoa.core.job_status import JobStatus, UPLOAD_STATUSES
 
 max_threads = min(32, os.cpu_count() * 2)
 
@@ -107,7 +109,6 @@ def _print_dry_run_summary(
 
 def run_cmd(
     inputs: Optional[List[str]] = None,
-    input_source: Optional[str] = None,
     input_dataset: Optional[str] = None,
     export_to: Optional[str] = None,
     output: Optional[List[str]] = None,
@@ -116,6 +117,7 @@ def run_cmd(
     storage: Optional[int] = None,
     tools: Optional[List[str]] = None,
     env_source: Optional[str] = None,
+    env_id: Optional[str] = None,
     cmd: str = "",
     download_path: Optional[str] = None,
     run_async: bool = False,
@@ -128,7 +130,29 @@ def run_cmd(
 ):
     
     """Run the job with the given configuration using the Bioconda-based execution environment."""
-    
+
+    # Transitional CLI behavior:
+    # - local --input remains unchanged
+    # - Google Drive input moves from --input-source to --input <url>::<mount_path>
+    # - dataset ids intentionally stay on --input-dataset
+    parsed_inputs = [parse_input_spec(raw) for raw in (inputs or [])]
+    local_specs = [spec for spec in parsed_inputs if spec.kind == "local"]
+    remote_specs = [spec for spec in parsed_inputs if spec.kind == "google_drive"]
+    unknown_specs = [spec for spec in parsed_inputs if spec.kind == "unknown"]
+
+    if unknown_specs:
+        console.print(
+            "[bold red]Error:[/bold red] Unsupported --input value(s): "
+            + ", ".join(spec.raw for spec in unknown_specs)
+        )
+        raise typer.Exit(code=1)
+    if len(remote_specs) > 1:
+        console.print("[bold red]Error:[/bold red] Multiple remote inputs are not supported yet.")
+        raise typer.Exit(code=1)
+    if remote_specs and local_specs:
+        console.print("[bold red]Error:[/bold red] Cannot combine local and remote --input values yet.")
+        raise typer.Exit(code=1)
+
     remote_input_context = None
     export_remote_ref = None
     import_transfer_public_id = None
@@ -154,35 +178,35 @@ def run_cmd(
             "folder_id": export_folder_id,
         }
 
-    if input_source:
-        source_kind = detect_input_source_kind(input_source)
+    if remote_specs:
+        remote_spec = remote_specs[0]
+        source_kind = detect_input_source_kind(remote_spec.source)
         if source_kind == "s3":
             console.print("[bold red]Error:[/bold red] S3 inputs are not implemented yet.")
             raise typer.Exit(code=1)
         if source_kind != "google_drive":
-            console.print("[bold red]Error:[/bold red] Unsupported --input-source value.")
+            console.print("[bold red]Error:[/bold red] Unsupported remote --input value.")
             raise typer.Exit(code=1)
         if input_dataset:
             console.print(
-                "[bold red]Error:[/bold red] Cannot combine --input-dataset with --input-source."
+                "[bold red]Error:[/bold red] Cannot combine --input-dataset with remote --input."
             )
             raise typer.Exit(code=1)
-        if not inputs or len(inputs) != 1:
+        if not remote_spec.mount_path:
             console.print(
-                "[bold red]Error:[/bold red] --input-source requires exactly one --input path "
-                "to act as the mounted execution path."
+                "[bold red]Error:[/bold red] Google Drive input requires "
+                "<gdrive_url>::<mount_path>."
             )
             raise typer.Exit(code=1)
 
-        imported_input = import_google_drive_input(
-            input_source,
-            retain_credential_for_export=bool(export_remote_ref),
-            defer_execution=True,
-        )
+        imported_input = import_google_drive_input(remote_spec.source)
         import_transfer_public_id = str(imported_input["transfer_public_id"])
-        input_root = os.path.abspath(str(inputs[0]))
-        input_dataset = None
-        remote_input_context = None
+        input_root = os.path.abspath(str(remote_spec.mount_path))
+        input_dataset = str(imported_input["dataset_public_id"])
+        remote_input_context = project_input_context(
+            input_root,
+            imported_input.get("input_context") or {},
+        )
         inputs = []
         use_existing_input_dataset = True
 
@@ -214,8 +238,10 @@ def run_cmd(
                 console.print("[bold red]Error:[/bold red] Google Drive export authorization failed.")
                 raise typer.Exit(code=1)
 
+    # Local inputs intentionally keep the old behavior in this PR.
+    inputs = [spec.source for spec in local_specs]
 
-    if input_dataset and inputs and not input_source:
+    if input_dataset and inputs:
         console.print(
             "[bold red]Error:[/bold red] Cannot specify both --input and --input-dataset options at the same time. Please choose one or the other."
         )
@@ -366,27 +392,38 @@ def run_cmd(
         console.print(
             f"[bold green]Job started successfully. View at:[/bold green][bold cyan] {settings.THOA_UI_URL}/workbench/jobs/{job_response.get('public_id')}[/bold cyan]")
 
-    # STEP 2: Package and create the environment object on the server
-    with console.status(f"Packaging Environment", spinner="dots12"):
-        tool_list = tools.split(",") if tools else []
-        env_spec = resolve_environment_spec(env_source=env_source)
-
-        environment_details = api_client.post("/environments", 
-            json={
-                "tools": tool_list,
-                "env_string": env_spec
-            }
-        )
-        if not environment_details:
-            console.print("[bold red]Failed to create environment. Please check your configuration.[/bold red]")
-            return
-        
-        updated_job_response = api_client.put(
+    # STEP 2: Resolve the environment and attach it to the job
+    if env_id:
+        with console.status("Looking up environment", spinner="dots12"):
+            env_results = api_client.get(f"/environments?public_id={env_id}")
+            if not env_results:
+                console.print(f"[bold red]Error:[/bold red] No environment found with ID [cyan]{env_id}[/cyan]. Use [bold]thoa envs list[/bold] to see your environments.")
+                return
+            environment_details = env_results[0] if isinstance(env_results, list) else env_results
+        console.print(f"[green]Using existing environment[/green] [cyan]{env_id}[/cyan] (status: {environment_details.get('env_status', '?')})")
+        api_client.put(
             f"/jobs/{job_response['public_id']}",
-            json={
-                "environment_public_id": environment_details["public_id"]
-            }
+            json={"environment_public_id": environment_details["public_id"]},
         )
+    else:
+        with console.status("Packaging Environment", spinner="dots12"):
+            tool_list = tools.split(",") if tools else []
+            env_spec = resolve_environment_spec(env_source=env_source)
+
+            environment_details = api_client.post("/environments",
+                json={
+                    "tools": tool_list,
+                    "env_string": env_spec
+                }
+            )
+            if not environment_details:
+                console.print("[bold red]Failed to create environment. Please check your configuration.[/bold red]")
+                return
+
+            api_client.put(
+                f"/jobs/{job_response['public_id']}",
+                json={"environment_public_id": environment_details["public_id"]},
+            )
 
 
     # STEP 3: Trigger validation of the environment ASYNC 
@@ -512,71 +549,95 @@ def run_cmd(
 
             upload_all(upload_links, file_map, md5_map, max_workers=max_threads)
 
-            while current_job_status(updated_job_response['public_id']) in [
-                "created", "queued", "pending", "uploading"
-            ]:
+            while current_job_status(updated_job_response['public_id']) in UPLOAD_STATUSES:
                 time.sleep(4)
+
+        if run_async:
+            console.print(Panel(
+                f"[bold green]Job submitted successfully![/bold green]\n\n"
+                f"[label]Job ID:[/label]    [value]{job_response['public_id']}[/value]\n"
+                f"[label]Status:[/label]    [value]{current_job_status(updated_job_response['public_id'])}[/value]\n"
+                f"[label]View:[/label]      [value]{settings.THOA_UI_URL}/workbench/jobs/{job_response['public_id']}[/value]\n"
+                f"[label]Attach:[/label]    [value]thoa jobs attach {job_response['public_id']}[/value]",
+                title="[title]Job Submitted (async)[/title]",
+                expand=False,
+                border_style="green"
+            ))
+            return
 
         with console.status(f"Validating your environment", spinner="dots12"):
-            while current_job_status(updated_job_response['public_id']) == "validating":
+            while current_job_status(updated_job_response['public_id']) == JobStatus.VALIDATING:
                 time.sleep(4)
 
-        if current_job_status(updated_job_response['public_id']) == "failed_validation":
+        if current_job_status(updated_job_response['public_id']) == JobStatus.FAILED_VALIDATION:
             _print_env_build_failure(updated_job_response['public_id'])
             raise typer.Exit(code=1)
 
         # STEP 8: Poll the server for disk creation and copy status
         with console.status(f"Staging your files", spinner="dots12"):
-            while current_job_status(updated_job_response['public_id']) == "staging":
+            while current_job_status(updated_job_response['public_id']) == JobStatus.STAGING:
                 time.sleep(4)
 
     if input_dataset and not new_input_dataset:
         with console.status(f"Queuing your job", spinner="dots12"):
-            while current_job_status(updated_job_response['public_id']) in ["created", "queued"]:
+            while current_job_status(updated_job_response['public_id']) in {JobStatus.CREATED, JobStatus.QUEUED}:
                 time.sleep(4)
 
         with console.status(f"Validating your environment", spinner="dots12"):
-            while current_job_status(updated_job_response['public_id']) == "validating":
+            while current_job_status(updated_job_response['public_id']) == JobStatus.VALIDATING:
                 time.sleep(4)
 
-        if current_job_status(updated_job_response['public_id']) == "failed_validation":
+        if current_job_status(updated_job_response['public_id']) == JobStatus.FAILED_VALIDATION:
             _print_env_build_failure(updated_job_response['public_id'])
             raise typer.Exit(code=1)
 
         with console.status(f"Staging your data", spinner="dots12"):
-            while current_job_status(updated_job_response['public_id']) == "staging":
+            while current_job_status(updated_job_response['public_id']) == JobStatus.STAGING:
                 time.sleep(4)
 
     if not new_input_dataset and not input_dataset:
         with console.status(f"Queuing your job", spinner="dots12"):
-            while current_job_status(updated_job_response['public_id']) in ["created", "queued"]:
+            while current_job_status(updated_job_response['public_id']) in {JobStatus.CREATED, JobStatus.QUEUED}:
                 time.sleep(4)
 
         with console.status(f"Validating your environment", spinner="dots12"):
-            while current_job_status(updated_job_response['public_id']) == "validating":
+            while current_job_status(updated_job_response['public_id']) == JobStatus.VALIDATING:
                 time.sleep(4)
 
-        if current_job_status(updated_job_response['public_id']) == "failed_validation":
+        if current_job_status(updated_job_response['public_id']) == JobStatus.FAILED_VALIDATION:
             _print_env_build_failure(updated_job_response['public_id'])
             raise typer.Exit(code=1)
 
+    if run_async:
+        console.print(Panel(
+            f"[bold green]Job submitted successfully![/bold green]\n\n"
+            f"[label]Job ID:[/label]   [value]{job_response['public_id']}[/value]\n"
+            f"[label]Status:[/label]   [value]{current_job_status(updated_job_response['public_id'])}[/value]\n"
+            f"[label]View:[/label]     [value]{settings.THOA_UI_URL}/workbench/jobs/{job_response['public_id']}[/value]",
+            title="[title]Job Submitted (async)[/title]",
+            expand=False,
+            border_style="green"
+        ))
+        return
+
     # STEP 9: Poll until the VM has been provisioned
     with console.status(f"Spawning a Virtual Machine for your job", spinner="dots12"):
-        while current_job_status(updated_job_response['public_id']) == "provisioning":
+        while current_job_status(updated_job_response['public_id']) == JobStatus.PROVISIONING:
             time.sleep(4)
 
-    if current_job_status(updated_job_response['public_id']) == "failed_validation":
+    if current_job_status(updated_job_response['public_id']) == JobStatus.FAILED_VALIDATION:
         _print_env_build_failure(updated_job_response['public_id'])
         raise typer.Exit(code=1)
 
     # STEP 11: Wait until the VM is ready to stream logs, then connect
     with console.status(f"Connecting to your job VM", spinner="dots12"):
-        while current_job_status(updated_job_response['public_id']) not in [
-            "running", "completed", "failed_execution", "failed_startup", "cancelled", "failed_validation"
-        ]:
+        while current_job_status(updated_job_response['public_id']) not in {
+            JobStatus.RUNNING, JobStatus.COMPLETED, JobStatus.FAILED_EXECUTION,
+            JobStatus.FAILED_STARTUP, JobStatus.CANCELLED, JobStatus.FAILED_VALIDATION
+        }:
             time.sleep(4)
 
-    if current_job_status(updated_job_response['public_id']) == "failed_validation":
+    if current_job_status(updated_job_response['public_id']) == JobStatus.FAILED_VALIDATION:
         _print_env_build_failure(updated_job_response['public_id'])
         raise typer.Exit(code=1)
 
@@ -584,9 +645,9 @@ def run_cmd(
 
     # STEP 12: Download output files to the local machine
     with console.status(f"Job Completed! Preparing your output dataset", spinner="dots12"):
-        while current_job_status(updated_job_response['public_id']) == "cleanup":
+        while current_job_status(updated_job_response['public_id']) == JobStatus.CLEANUP:
             time.sleep(4) 
-            if current_job_status(updated_job_response['public_id']) == "completed":
+            if current_job_status(updated_job_response['public_id']) == JobStatus.COMPLETED:
                 break
 
     with console.status(f"Downloading output files", spinner="dots12"):

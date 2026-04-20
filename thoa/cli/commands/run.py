@@ -199,14 +199,15 @@ def run_cmd(
             )
             raise typer.Exit(code=1)
 
-        imported_input = import_google_drive_input(remote_spec.source)
+        imported_input = import_google_drive_input(
+            remote_spec.source,
+            retain_credential_for_export=bool(export_remote_ref),
+            defer_execution=True,
+        )
         import_transfer_public_id = str(imported_input["transfer_public_id"])
         input_root = os.path.abspath(str(remote_spec.mount_path))
-        input_dataset = str(imported_input["dataset_public_id"])
-        remote_input_context = project_input_context(
-            input_root,
-            imported_input.get("input_context") or {},
-        )
+        input_dataset = None
+        remote_input_context = None
         inputs = []
         use_existing_input_dataset = True
 

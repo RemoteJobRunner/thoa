@@ -177,22 +177,15 @@ def test_job_script_failure():
 @pytest.mark.slow
 def test_dataset_download_after_job(tmp_path):
     """Submit job that produces output, then download output dataset via CLI.
-    The --output path tells the backend WHERE on the VM to look for outputs.
-    The script must write files into that same path (mounted via AZURE_MOUNT_PATH)."""
-    input_file = tmp_path / "input.txt"
-    input_file.write_text("test data for download")
-
-    output_path = tmp_path / "output"
-    output_path.mkdir()
+    Uses a fixed /tmp/thoa_test_output path so it works both locally and on CI."""
     download_dir = tmp_path / "downloads"
     download_dir.mkdir()
 
     job_id, _ = _run_job([
         "run",
-        "--input", str(input_file),
         "--tools", "bash",
-        "--cmd", f"cp $(find / -name input.txt -type f 2>/dev/null | head -1) {output_path}/result.txt",
-        "--output", str(output_path),
+        "--cmd", "mkdir -p /tmp/thoa_test_output && echo 'hello from test' > /tmp/thoa_test_output/result.txt",
+        "--output", "/tmp/thoa_test_output",
         "--download-dir", str(download_dir),
         "--n-cores", "2", "--ram", "4", "--storage", "50",
     ])

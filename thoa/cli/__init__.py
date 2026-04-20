@@ -8,7 +8,7 @@ from .commands.jobs import app as jobs_app
 from .commands.envs import app as envs_app
 from thoa.core.job_utils import console
 
-app = typer.Typer(help="THOA CLI tool", add_completion=False)
+app = typer.Typer(help="THOA CLI tool", add_completion=False, context_settings={"help_option_names": ["-h", "--help"]})
 app.add_typer(dataset_app, name="dataset", help="Dataset-related commands")
 app.add_typer(tools_app, name="tools")
 app.add_typer(jobs_app, name="jobs")

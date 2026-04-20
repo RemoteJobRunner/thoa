@@ -10,7 +10,7 @@ from datetime import datetime
 
 console = Console()
 
-app = typer.Typer(help="Environment-related commands")
+app = typer.Typer(help="Environment-related commands", context_settings={"help_option_names": ["-h", "--help"]})
 
 
 def _fmt_ts(ts: str) -> str:

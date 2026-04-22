@@ -7,7 +7,7 @@ from typing import Optional
 
 console = Console()
 
-app = typer.Typer(help="Dataset-related commands")
+app = typer.Typer(help="Dataset-related commands", context_settings={"help_option_names": ["-h", "--help"]})
 
 @app.command("list")
 def list_(

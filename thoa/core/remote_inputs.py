@@ -22,6 +22,17 @@ def detect_input_source_kind(value: str | None) -> str:
     return "unknown"
 
 
+def detect_remote_ref_kind(value: str | None) -> str:
+    if not value:
+        return "none"
+    value = str(value).strip()
+    if extract_google_drive_folder_id(value):
+        return "google_drive"
+    if value.startswith("s3://"):
+        return "s3"
+    return "unknown"
+
+
 def project_input_context(input_root: str, input_context: dict[str, object]) -> dict[str, object]:
     root = input_root.rstrip("/") or "/"
     projected = {}
@@ -107,27 +118,7 @@ def _wait_for_google_callback(expected_state: str, timeout_seconds: int = 300) -
     return str(payload["code"])
 
 
-def import_google_drive_input(folder_url: str) -> dict[str, object]:
-    folder_id = extract_google_drive_folder_id(folder_url)
-    if not folder_id:
-        console.print("[bold red]Invalid Google Drive folder URL.[/bold red]")
-        raise typer.Exit(code=1)
-
-    transfer = api_client.post(
-        "/data-transfers",
-        json={
-            "provider": "google_drive",
-            "direction": "import",
-            "source_ref": {
-                "provider": "google_drive",
-                "folder_id": folder_id,
-            },
-        },
-    )
-    if not transfer:
-        raise typer.Exit(code=1)
-
-    transfer_id = transfer["public_id"]
+def authorize_google_drive_transfer(transfer_id: str) -> dict[str, object]:
     redirect_uri = google_drive_redirect_uri()
 
     auth_start = api_client.post(
@@ -157,6 +148,40 @@ def import_google_drive_input(folder_url: str) -> dict[str, object]:
     if not auth_complete:
         raise typer.Exit(code=1)
 
+    return auth_complete
+
+
+def import_google_drive_input(
+    folder_url: str,
+    *,
+    retain_credential_for_export: bool = False,
+    defer_execution: bool = False,
+) -> dict[str, object]:
+    folder_id = extract_google_drive_folder_id(folder_url)
+    if not folder_id:
+        console.print("[bold red]Invalid Google Drive folder URL.[/bold red]")
+        raise typer.Exit(code=1)
+
+    transfer = api_client.post(
+        "/data-transfers",
+        json={
+            "provider": "google_drive",
+            "direction": "import",
+            "remote_ref": {
+                "provider": "google_drive",
+                "folder_id": folder_id,
+            },
+            "retain_credential_for_export": retain_credential_for_export,
+        },
+    )
+    if not transfer:
+        raise typer.Exit(code=1)
+
+    transfer_id = transfer["public_id"]
+    auth_complete = authorize_google_drive_transfer(transfer_id)
+    if not auth_complete:
+        raise typer.Exit(code=1)
+
     manifest_status = api_client.post(f"/data-transfers/{transfer_id}/manifest")
     if not manifest_status:
         raise typer.Exit(code=1)
@@ -167,6 +192,13 @@ def import_google_drive_input(folder_url: str) -> dict[str, object]:
             f"[green]Google Drive manifest ready:[/green] "
             f"{manifest['total_items']} items, {manifest['total_bytes']} bytes"
         )
+
+    if defer_execution:
+        return {
+            "transfer_public_id": transfer_id,
+            "status": manifest_status.get("status"),
+            "manifest": manifest,
+        }
 
     start_status = api_client.post(f"/data-transfers/{transfer_id}/start")
     if not start_status:

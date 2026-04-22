@@ -38,7 +38,10 @@ from thoa.core.job_utils import (
 )
 from thoa.core.input_specs import parse_input_spec
 from thoa.core.remote_inputs import (
+    authorize_google_drive_transfer,
     detect_input_source_kind,
+    detect_remote_ref_kind,
+    extract_google_drive_folder_id,
     import_google_drive_input,
     project_input_context,
 )
@@ -107,6 +110,7 @@ def _print_dry_run_summary(
 def run_cmd(
     inputs: Optional[List[str]] = None,
     input_dataset: Optional[str] = None,
+    export_to: Optional[str] = None,
     output: Optional[List[str]] = None,
     n_cores: Optional[int] = None,
     ram: Optional[int] = None,
@@ -150,6 +154,29 @@ def run_cmd(
         raise typer.Exit(code=1)
 
     remote_input_context = None
+    export_remote_ref = None
+    import_transfer_public_id = None
+    export_transfer_public_id = None
+    input_root = None
+
+    if export_to:
+        export_kind = detect_remote_ref_kind(export_to)
+        if export_kind == "s3":
+            console.print("[bold red]Error:[/bold red] S3 exports are not implemented yet.")
+            raise typer.Exit(code=1)
+        if export_kind != "google_drive":
+            console.print("[bold red]Error:[/bold red] Unsupported --export-to value.")
+            raise typer.Exit(code=1)
+
+        export_folder_id = extract_google_drive_folder_id(export_to)
+        if not export_folder_id:
+            console.print("[bold red]Error:[/bold red] Invalid Google Drive folder URL for --export-to.")
+            raise typer.Exit(code=1)
+
+        export_remote_ref = {
+            "provider": "google_drive",
+            "folder_id": export_folder_id,
+        }
 
     if remote_specs:
         remote_spec = remote_specs[0]
@@ -172,15 +199,45 @@ def run_cmd(
             )
             raise typer.Exit(code=1)
 
-        imported_input = import_google_drive_input(remote_spec.source)
-        input_root = os.path.abspath(str(remote_spec.mount_path))
-        input_dataset = str(imported_input["dataset_public_id"])
-        remote_input_context = project_input_context(
-            input_root,
-            imported_input.get("input_context") or {},
+        imported_input = import_google_drive_input(
+            remote_spec.source,
+            retain_credential_for_export=bool(export_remote_ref),
+            defer_execution=True,
         )
+        import_transfer_public_id = str(imported_input["transfer_public_id"])
+        input_root = os.path.abspath(str(remote_spec.mount_path))
+        input_dataset = None
+        remote_input_context = None
         inputs = []
         use_existing_input_dataset = True
+
+    if export_remote_ref:
+        export_payload = {
+            "provider": "google_drive",
+            "direction": "export",
+            "remote_ref": export_remote_ref,
+        }
+        if import_transfer_public_id:
+            export_payload["credential_transfer_public_id"] = import_transfer_public_id
+
+        export_transfer = api_client.post(
+            "/data-transfers",
+            json=export_payload,
+        )
+        if not export_transfer:
+            raise typer.Exit(code=1)
+
+        export_transfer_public_id = str(export_transfer["public_id"])
+
+        if export_transfer.get("status") == "pending_auth":
+            export_status = authorize_google_drive_transfer(export_transfer_public_id)
+            if not export_status:
+                raise typer.Exit(code=1)
+
+            export_transfer = api_client.get(f"/data-transfers/{export_transfer_public_id}")
+            if not export_transfer or export_transfer.get("status") != "authorized":
+                console.print("[bold red]Error:[/bold red] Google Drive export authorization failed.")
+                raise typer.Exit(code=1)
 
     # Local inputs intentionally keep the old behavior in this PR.
     inputs = [spec.source for spec in local_specs]
@@ -304,6 +361,9 @@ def run_cmd(
             "has_input_data": has_input_data,
             "client_home": client_home,
             "use_existing_input_dataset": use_existing_input_dataset,
+            "import_transfer_public_id": import_transfer_public_id,
+            "export_transfer_public_id": export_transfer_public_id,
+            "input_mount_root": input_root,
         })
 
         # Always set script/cwd/output metadata so backend can build run_command
@@ -327,6 +387,7 @@ def run_cmd(
             f"/jobs/{job_response['public_id']}",
             json=job_update_payload,
         )
+
 
         # print(f"Job started successfully. View at: {job_response.get("public_id")}")
         console.print(

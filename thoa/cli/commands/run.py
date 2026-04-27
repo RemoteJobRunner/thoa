@@ -610,15 +610,23 @@ def run_cmd(
         if download_path:
             job_with_output = api_client.get(f"/jobs?public_id={updated_job_response['public_id']}")[0]
             output_dataset_id = job_with_output.get("output_dataset_public_id")
-            
+
+            if not output_dataset_id:
+                console.print("\n[yellow]No output dataset found — skipping download.[/yellow]")
+                raise typer.Exit(code=0)
+
             output_links = api_client.get(
-                "/temporary_links", 
+                "/temporary_links",
                 params={
                     "dataset_public_id": output_dataset_id,
                     "job_public_id": updated_job_response['public_id'],
                     "link_type": "download_outputs"
                 }
             )
+
+            if not output_links:
+                console.print("\n[yellow]No output files to download.[/yellow]")
+                raise typer.Exit(code=0)
 
             for link in output_links:
 

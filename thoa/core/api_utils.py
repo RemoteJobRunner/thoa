@@ -90,7 +90,7 @@ class ApiClient:
     def close(self):
         self.client.close()
 
-    async def stream_logs(self, job_id: str, from_id: str = "$"):
+    async def stream_logs(self, job_id: str, from_id: str = "$", print_done: bool = True):
         """
         Connects to ws://<base>/ws/logs/{job_id}?from_id=<from_id>
         Sends X-API-Key and the same Accept header as HTTP client.
@@ -135,10 +135,11 @@ class ApiClient:
                     break
 
                 if msg.get("event") == "done":
-                    if msg.get("success") == 1:
-                        console.print("[bold green] Job succeeded [/bold green]")
-                    else:
-                        console.print("[bold red] Job failed [/bold red]")
+                    if print_done:
+                        if msg.get("success") == 1:
+                            console.print("[bold green] Job succeeded [/bold green]")
+                        else:
+                            console.print("[bold red] Job failed [/bold red]")
                     await ws.close()
                     break
 
@@ -151,9 +152,9 @@ class ApiClient:
                 else:
                     console.print(f"[blue][remote stdout][/blue] {data}", end="")
 
-    def stream_logs_blocking(self, job_id: str, from_id: str = "0-0"):
+    def stream_logs_blocking(self, job_id: str, from_id: str = "0-0", print_done: bool = True):
         """Convenience wrapper for sync CLIs."""
-        asyncio.run(self.stream_logs(job_id, from_id))
+        asyncio.run(self.stream_logs(job_id, from_id, print_done))
 
 api_client = ApiClient(
     base_url=settings.THOA_API_URL,

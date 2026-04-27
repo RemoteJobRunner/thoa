@@ -582,7 +582,7 @@ def run_cmd(
         _print_env_build_failure(updated_job_response['public_id'])
         raise typer.Exit(code=1)
 
-    api_client.stream_logs_blocking(job_response['public_id'], from_id="0-0", print_done=False)
+    api_client.stream_logs_blocking(job_response['public_id'], from_id="0-0")
 
     # STEP 12: Download output files to the local machine
     with console.status(f"Job Completed! Preparing your output dataset", spinner="dots12"):
@@ -590,20 +590,9 @@ def run_cmd(
             time.sleep(4) 
             if current_job_status(updated_job_response['public_id']) == JobStatus.COMPLETED:
                 break
-
-    final_status = current_job_status(updated_job_response['public_id'])
-    if final_status == JobStatus.COMPLETED:
-        console.print("[bold green] Job succeeded [/bold green]")
-    else:
-        status_messages = {
-            JobStatus.CANCELLED: "Job was cancelled. No output files will be downloaded.",
-            JobStatus.FAILED_EXECUTION: "Job failed during execution. No output files will be downloaded.",
-            JobStatus.FAILED_STARTUP: "Job failed to start. No output files will be downloaded.",
-            JobStatus.FAILED_PROVISIONING: "Job failed during provisioning. No output files will be downloaded.",
-            JobStatus.FAILED_UPLOAD: "Job failed during upload. No output files will be downloaded.",
-        }
-        msg = status_messages.get(final_status, f"Job ended with status '{final_status}'. No output files will be downloaded.")
-        console.print(f"[yellow]{msg}[/yellow]")
+ 
+    if current_job_status(updated_job_response['public_id']) == JobStatus.CANCELLED:
+        console.print("[yellow]Job was cancelled. No output files will be downloaded.[/yellow]")
         raise typer.Exit(code=1)
 
     with console.status(f"Downloading output files", spinner="dots12"):

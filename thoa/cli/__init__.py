@@ -21,6 +21,10 @@ def run_cmd(
         [], "--input", "-i", help="Input path. Local paths keep their current behavior. "
         "Google Drive input is specified as <gdrive_url>::<mount_path>.",
     ),
+    export_to: Optional[str] = typer.Option(
+        None, "--export-to", help="Remote export destination such as a Google Drive folder URL. "
+        "The finished output dataset will be exported there after the run completes.",
+    ),
     input_dataset: Optional[str] = typer.Option(
         None, "--input-dataset", help="Minihash identifying an existing input dataset (bypasses file upload)."
     ),
@@ -101,6 +105,7 @@ def run_cmd(
     run.run_cmd(
         inputs=inputs,
         input_dataset=input_dataset,
+        export_to=export_to,
         output=output,
         n_cores=n_cores,
         ram=ram,

@@ -7,6 +7,7 @@ Run with: pytest tests/integration/test_run.py -v -m slow
 """
 
 import re
+import time
 import pytest
 from typer.testing import CliRunner
 from thoa.cli import app
@@ -159,6 +160,50 @@ def test_job_with_invalid_tool():
     assert final_status in {"failed", "failed_validation"}, (
         f"Job {job['public_id']} ended '{final_status}', expected failed/failed_validation"
     )
+
+
+@pytest.mark.slow
+def test_cancel_running_job_no_error_message():
+    """Cancelling a running job via CLI shows the cancelled message and no error."""
+    script = api_post("/scripts", json={
+        "name": "cancel test",
+        "script_content": "sleep 300",
+        "description": "test",
+        "security_status": "pending",
+    }).json()
+
+    job = api_post("/jobs", json={
+        "requested_ram": 4, "requested_cpu": 2,
+        "requested_disk_space": 50, "has_input_data": False,
+        "client_home": "/tmp",
+    }).json()
+
+    api_put(f"/jobs/{job['public_id']}", json={
+        "script_public_id": script["public_id"],
+        "current_working_directory": "/tmp",
+    })
+
+    env = api_post("/environments", json={
+        "tools": ["bash"], "env_string": "",
+    }).json()
+
+    api_put(f"/jobs/{job['public_id']}", json={
+        "environment_public_id": env["public_id"],
+    })
+
+    deadline = time.time() + 300
+    while time.time() < deadline:
+        if get_job_status(job["public_id"]) == "running":
+            break
+        time.sleep(5)
+    else:
+        pytest.fail("Job did not reach running state within 5 min")
+
+    result = runner.invoke(app, ["jobs", "cancel", job["public_id"]])
+    assert result.exit_code == 0
+    assert "cancelled" in result.output.lower()
+    assert "Error" not in result.output
+    assert "Traceback" not in result.output
 
 
 @pytest.mark.slow

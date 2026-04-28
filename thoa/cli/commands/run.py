@@ -559,7 +559,8 @@ def run_cmd(
                 f"[label]Job ID:[/label]    [value]{job_response['public_id']}[/value]\n"
                 f"[label]Status:[/label]    [value]{current_job_status(updated_job_response['public_id'])}[/value]\n"
                 f"[label]View:[/label]      [value]{settings.THOA_UI_URL}/workbench/jobs/{job_response['public_id']}[/value]\n"
-                f"[label]Attach:[/label]    [value]thoa jobs attach {job_response['public_id']}[/value]",
+                f"[label]Attach:[/label]    [value]thoa jobs attach {job_response['public_id']}[/value]\n"
+                f"[label]Cancel:[/label]    [value]thoa jobs cancel {job_response['public_id']}[/value]",
                 title="[title]Job Submitted (async)[/title]",
                 expand=False,
                 border_style="green"
@@ -650,20 +651,32 @@ def run_cmd(
             time.sleep(4) 
             if current_job_status(updated_job_response['public_id']) == JobStatus.COMPLETED:
                 break
+ 
+    if current_job_status(updated_job_response['public_id']) == JobStatus.CANCELLED:
+        console.print("[yellow]Job was cancelled. No output files will be downloaded.[/yellow]")
+        raise typer.Exit(code=1)
 
     with console.status(f"Downloading output files", spinner="dots12"):
         if download_path:
             job_with_output = api_client.get(f"/jobs?public_id={updated_job_response['public_id']}")[0]
             output_dataset_id = job_with_output.get("output_dataset_public_id")
-            
+
+            if not output_dataset_id:
+                console.print("\n[yellow]No output dataset found — skipping download.[/yellow]")
+                raise typer.Exit(code=0)
+
             output_links = api_client.get(
-                "/temporary_links", 
+                "/temporary_links",
                 params={
                     "dataset_public_id": output_dataset_id,
                     "job_public_id": updated_job_response['public_id'],
                     "link_type": "download_outputs"
                 }
             )
+
+            if not output_links:
+                console.print("\n[yellow]No output files to download.[/yellow]")
+                raise typer.Exit(code=0)
 
             for link in output_links:
 

@@ -83,6 +83,12 @@ def run_cmd(
     verbose: bool = typer.Option(
         False, "--verbose", help="Enable verbose output."
     ),
+    strict: bool = typer.Option(
+        False, "--strict", help="Disable AI auto-retries. Job will not be retried if it fails."
+    ),
+    max_attempts: int = typer.Option(
+        3, "--max-attempts", help="Maximum number of AI retry attempts (default 3)."
+    ),
 ):
 
     has_input_data = bool(inputs) or bool(input_dataset)
@@ -122,6 +128,8 @@ def run_cmd(
         verbose=verbose,
         has_input_data=has_input_data,
         use_existing_input_dataset=bool(input_dataset),
+        strict=strict,
+        max_attempts=max_attempts,
     )
 
     

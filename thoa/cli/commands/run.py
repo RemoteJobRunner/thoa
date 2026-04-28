@@ -127,6 +127,8 @@ def run_cmd(
     verbose: bool = False,
     has_input_data: bool = True,
     use_existing_input_dataset: bool = False,
+    strict: bool = False,
+    max_attempts: int = 3,
 ):
     
     """Run the job with the given configuration using the Bioconda-based execution environment."""
@@ -364,6 +366,8 @@ def run_cmd(
             "import_transfer_public_id": import_transfer_public_id,
             "export_transfer_public_id": export_transfer_public_id,
             "input_mount_root": input_root,
+            "strict": strict,
+            "max_attempts": max_attempts,
         })
 
         # Always set script/cwd/output metadata so backend can build run_command

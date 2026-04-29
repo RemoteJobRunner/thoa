@@ -647,7 +647,92 @@ def run_cmd(
         _print_env_build_failure(updated_job_response['public_id'])
         raise typer.Exit(code=1)
 
-    api_client.stream_logs_blocking(job_response['public_id'], from_id="0-0")
+    # STEP 11b: Stream logs for each attempt, following AI retries
+    job_public_id = job_response['public_id']
+    seen_attempt_numbers: set[int] = set()
+
+    def _get_attempts() -> list[dict]:
+        result = api_client.get(f"/jobs/{job_public_id}/attempts")
+        return result if isinstance(result, list) else []
+
+    def _stream_attempt(attempt: dict) -> bool:
+        """Stream logs for one attempt. Returns True on success."""
+        n = attempt['attempt_number']
+        console.print(f"\n[bold]Attempt {n}[/bold]")
+        # Pass job_public_id — the gateway resolves it to the latest attempt's Redis stream
+        succeeded = api_client.stream_logs_blocking(job_public_id, from_id="0-0")
+        return succeeded
+
+    def _wait_for_attempt_running(attempt_public_id: str, timeout: int = 300) -> bool:
+        """Poll until attempt is running (or terminal). Returns True if running/completed."""
+        deadline = time.time() + timeout
+        running_or_terminal = {
+            JobStatus.RUNNING, JobStatus.COMPLETED, JobStatus.FAILED_EXECUTION,
+            JobStatus.FAILED_STARTUP, JobStatus.CANCELLED, JobStatus.FAILED_VALIDATION,
+        }
+        while time.time() < deadline:
+            attempt_data = api_client.get(f"/attempts/{attempt_public_id}")
+            if attempt_data and attempt_data.get("status") in running_or_terminal:
+                return True
+            time.sleep(4)
+        return False
+
+    # Stream all attempts (starting from what's already running)
+    final_succeeded = False
+    while True:
+        attempts = _get_attempts()
+        # Find the next unseen attempt
+        next_attempt = next(
+            (a for a in attempts if a['attempt_number'] not in seen_attempt_numbers),
+            None
+        )
+        if next_attempt is None:
+            # No new attempt yet — wait briefly and check again (AI may be creating one)
+            time.sleep(4)
+            attempts = _get_attempts()
+            next_attempt = next(
+                (a for a in attempts if a['attempt_number'] not in seen_attempt_numbers),
+                None
+            )
+            if next_attempt is None:
+                break
+
+        n = next_attempt['attempt_number']
+        seen_attempt_numbers.add(n)
+
+        if n > 1:
+            # Show what the AI changed
+            ai_note = next_attempt.get('ai_note') or ''
+            if ai_note:
+                console.print(f"\n[yellow]AI retry — Attempt {n}:[/yellow] {ai_note}")
+            else:
+                console.print(f"\n[yellow]AI is retrying with Attempt {n}...[/yellow]")
+            with console.status(f"Waiting for Attempt {n} to start", spinner="dots12"):
+                _wait_for_attempt_running(next_attempt['public_id'])
+
+        succeeded = _stream_attempt(next_attempt)
+        final_succeeded = succeeded
+
+        if succeeded:
+            break
+
+        # Failure — print message and wait to see if AI creates another attempt
+        console.print(f"\n[bold red]Attempt {n} failed.[/bold red] Waiting to see if AI will retry...")
+        # Give AI intervention up to 60 s to create the next attempt
+        deadline = time.time() + 60
+        found_next = False
+        while time.time() < deadline:
+            time.sleep(5)
+            fresh_attempts = _get_attempts()
+            if len(fresh_attempts) > len(seen_attempt_numbers):
+                found_next = True
+                break
+        if not found_next:
+            console.print("[red]No further attempts. Job failed.[/red]")
+            break
+
+    if not final_succeeded:
+        raise typer.Exit(code=1)
 
     # STEP 12: Download output files to the local machine
     with console.status(f"Job Completed! Preparing your output dataset", spinner="dots12"):

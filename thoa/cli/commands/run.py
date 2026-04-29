@@ -9,6 +9,11 @@ from rich.console import Console
 from rich.theme import Theme
 from rich import print as rprint
 from rich.spinner import Spinner
+from rich.text import Text
+from rich.live import Live
+from rich.progress import Progress, ProgressBar, SpinnerColumn, BarColumn, TextColumn, TimeElapsedColumn, MofNCompleteColumn
+from rich import box
+from datetime import datetime, timezone
 from thoa.core import resolve_environment_spec
 from concurrent.futures import ThreadPoolExecutor
 from threading import Thread
@@ -31,10 +36,13 @@ from thoa.core.job_utils import (
     hash_all,
     file_sizes_in_bytes,
     current_job_status,
+    current_job_detail,
     all_files_have_upload_links,
     upload_all,
     max_threads,
-    console
+    console,
+    _fmt_duration,
+    _parse_job_timestamp,
 )
 from thoa.core.input_specs import parse_input_spec
 from thoa.core.remote_inputs import (
@@ -42,9 +50,295 @@ from thoa.core.remote_inputs import (
     import_google_drive_input,
     project_input_context,
 )
-from thoa.core.job_status import JobStatus, UPLOAD_STATUSES
+from thoa.core.job_status import JobStatus
 
 max_threads = min(32, os.cpu_count() * 2)
+
+
+def _fmt_bytes(n: int) -> str:
+    if n < 1_024:
+        return f"{n} B"
+    if n < 1_048_576:
+        return f"{n / 1_024:.1f} KB"
+    if n < 1_073_741_824:
+        return f"{n / 1_048_576:.1f} MB"
+    return f"{n / 1_073_741_824:.2f} GB"
+
+
+def _wait_queue(job_id: str) -> None:
+    QUEUED = {JobStatus.CREATED, JobStatus.QUEUED}
+    with Progress(SpinnerColumn(), TextColumn("[cyan]{task.description}[/cyan]"), console=console) as prog:
+        task = prog.add_task("Waiting in queue...", total=None)
+        while True:
+            status = current_job_status(job_id)
+            if status not in QUEUED:
+                break
+            detail = current_job_detail(job_id)
+            pos = detail.get("queue_position")
+            if pos is not None:
+                ahead = pos - 1
+                if ahead == 0:
+                    label = "Next in queue"
+                else:
+                    label = f"{ahead} job{'s' if ahead != 1 else ''} ahead in queue"
+                prog.update(task, description=label)
+            time.sleep(4)
+
+
+_LIVE_STEPS = [
+    ("queued",            "Waiting in queue",   "< 1 min"),
+    ("uploading",         "Uploading files",    "< 1 min"),
+    ("provisioning",      "Provisioning VM",    "~2–4 min"),
+    ("staging",           "Staging files",      "~1–2 min"),
+    ("running",           "Running",            None),
+    ("uploading_outputs", "Uploading outputs",  "~1 min"),
+    ("completed",         "Completed",          None),
+]
+
+# Estimated duration per step in seconds, used to drive the progress bars.
+# "running" is intentionally absent — it's a black box with no predictable duration.
+_STEP_ESTIMATES_SEC = {
+    "queued":            30,
+    "uploading":         45,
+    "provisioning":      180,   # midpoint of the displayed ~2–4 min estimate
+    "staging":           90,
+    "uploading_outputs": 60,
+}
+
+# If a step exceeds this many seconds, show a "taking longer than expected" warning.
+# Only steps whose duration is independent of job/data size are included.
+# staging, uploading, uploading_outputs, and running are all excluded because
+# they scale with data volume and can legitimately run for hours on large jobs.
+_STUCK_THRESHOLDS_SEC = {
+    "queued":       5 * 60,   # Prefect pickup; >5 min likely means scheduler is down
+    "provisioning": 10 * 60,  # VM spin-up; independent of data size
+}
+
+_LIVE_STEP_KEYS = [s[0] for s in _LIVE_STEPS]
+
+_LIVE_FAILURE_STEP: dict[str, str] = {
+    "failed_upload":       "uploading",
+    "failed_validation":   "provisioning",
+    "failed_provisioning": "provisioning",
+    "failed_execution":    "running",
+    "failed_startup":      "queued",
+    # "cancelled" is handled dynamically in _build_table — the failed step is
+    # whichever step was active when the user cancelled, not always "queued".
+}
+
+_LIVE_TERMINAL = {
+    "completed", "archived",
+    "failed_upload", "failed_validation", "failed_provisioning",
+    "failed_execution", "failed_startup", "cancelled",
+}
+
+
+def _live_job_progress(job_id: str, upload_state: dict | None = None) -> None:
+    """Show all canonical job steps in a single Rich Live display.
+
+    Polls status_timestamps and updates spinner → checkmark per step.
+    Exits when the job reaches any terminal or failure status.
+    upload_state, if provided, is a dict with n_done/n_total/size_str updated
+    by a concurrent upload thread so the 'uploading' row shows live file counts.
+    """
+    def _build_table(detail: dict) -> Table:
+        ts = detail.get("status_timestamps") or {}
+        status = detail.get("status", "")
+        files_staged = detail.get("files_staged") or 0
+        files_total = detail.get("files_total")
+        finished_at = detail.get("finished_at")
+        queue_pos = detail.get("queue_position")
+        input_ds = detail.get("input_dataset") or {}
+
+        if status == "cancelled":
+            # Find the last step that actually ran so completed steps still show green.
+            failed_step = next((k for k in reversed(_LIVE_STEP_KEYS) if ts.get(k)), "queued")
+        else:
+            failed_step = _LIVE_FAILURE_STEP.get(status)
+        is_complete = status in ("completed", "archived")
+
+        table = Table(box=None, padding=(0, 1), show_header=False, expand=False)
+        table.add_column("icon", no_wrap=True, width=3)
+        table.add_column("label", min_width=20)
+        table.add_column("bar", no_wrap=True, width=22)
+        table.add_column("detail")
+
+        for (key, label, estimate) in _LIVE_STEPS:
+            start_ts = ts.get(key)
+
+            if is_complete:
+                state = "done" if start_ts else "skip"
+            elif failed_step:
+                failed_idx = _LIVE_STEP_KEYS.index(failed_step)
+                this_idx = _LIVE_STEP_KEYS.index(key)
+                if key == failed_step:
+                    state = "failed"
+                elif this_idx < failed_idx:
+                    state = "done" if start_ts else "skip"
+                else:
+                    state = "skip"
+            elif start_ts and key == status:
+                state = "active"
+            elif start_ts:
+                state = "done"
+            elif key == status:
+                state = "active"
+            else:
+                state = "pending"
+
+            if state == "skip":
+                continue
+
+            if state == "done":
+                icon = Text("✓", style="bold green")
+            elif state == "active":
+                icon = Spinner("dots", style="cyan")
+            elif state == "failed":
+                icon = Text("✗", style="bold red")
+            else:
+                icon = Text("·", style="dim")
+
+            style_map = {"done": "green", "active": "bold cyan", "failed": "red", "pending": "dim"}
+            label_text = Text(label, style=style_map[state])
+
+            # Progress bar — "running" is a black box so no bar is shown.
+            if key == "running":
+                bar: ProgressBar | Text = Text("")
+            elif state == "done":
+                bar = ProgressBar(total=100, completed=100, width=20,
+                                  complete_style="green", finished_style="green")
+            elif state == "active":
+                if key == "uploading" and upload_state and upload_state.get("n_total"):
+                    pct = int((upload_state["n_done"] / upload_state["n_total"]) * 100)
+                elif key == "staging" and files_total:
+                    pct = int((files_staged / files_total) * 100)
+                elif start_ts:
+                    start_dt = _parse_job_timestamp(start_ts)
+                    elapsed = (datetime.now(timezone.utc).replace(tzinfo=None) - start_dt).total_seconds()
+                    est_sec = _STEP_ESTIMATES_SEC.get(key, 60)
+                    pct = int(min(elapsed / est_sec, 0.95) * 100)
+                else:
+                    pct = 0
+                bar = ProgressBar(total=100, completed=pct, width=20, complete_style="cyan")
+            elif state == "failed":
+                bar = ProgressBar(total=100, completed=100, width=20,
+                                  complete_style="red", finished_style="red")
+            else:  # pending
+                bar = ProgressBar(total=100, completed=0, width=20, style="bar.back")
+
+            detail_parts: list[str] = []
+            if state == "done" and start_ts:
+                end_ts = next((ts[k] for k in _LIVE_STEP_KEYS[_LIVE_STEP_KEYS.index(key)+1:] if ts.get(k)), None)
+                if not end_ts:
+                    end_ts = finished_at
+                if end_ts:
+                    detail_parts.append(_fmt_duration(start_ts, end_ts))
+                if key == "uploading":
+                    if upload_state and upload_state.get("n_total"):
+                        n = upload_state["n_total"]
+                        sz = upload_state.get("size_str", "")
+                        detail_parts.append(f"{n} {'file' if n == 1 else 'files'}{' · ' + sz if sz else ''}")
+                    elif input_ds.get("number_of_files"):
+                        n = input_ds["number_of_files"]
+                        detail_parts.append(f"{n} {'file' if n == 1 else 'files'} · {_fmt_bytes(input_ds.get('total_size') or 0)}")
+                elif key == "staging":
+                    n = files_total or input_ds.get("number_of_files")
+                    if n:
+                        sz = _fmt_bytes(input_ds.get("total_size") or 0)
+                        detail_parts.append(f"{n} {'file' if n == 1 else 'files'}{' · ' + sz if sz else ''}")
+            elif state == "active":
+                if start_ts:
+                    now_iso = datetime.now(timezone.utc).isoformat()
+                    verb = "waiting for" if key == "queued" else "running for"
+                    detail_parts.append(f"{verb} {_fmt_duration(start_ts, now_iso)}")
+                if key == "queued" and queue_pos is not None:
+                    ahead = queue_pos - 1
+                    if ahead == 0:
+                        detail_parts.append("next in queue")
+                    elif ahead > 0:
+                        detail_parts.append(f"{ahead} job{'s' if ahead != 1 else ''} ahead")
+                elif key == "uploading" and upload_state:
+                    n_done = upload_state["n_done"]
+                    n_total = upload_state["n_total"]
+                    size_str = upload_state.get("size_str", "")
+                    count_str = f"{n_done}/{n_total} files"
+                    detail_parts.append(f"{count_str}  {size_str}" if size_str else count_str)
+                elif key == "staging" and files_total:
+                    detail_parts.append(f"{files_staged}/{files_total} files")
+                if estimate:
+                    detail_parts.append(f"est. {estimate}")
+            elif state == "failed":
+                detail_parts.append("failed")
+
+            # Stuck-step warning: append after other detail parts so it's visible
+            is_stuck = False
+            if state == "active" and start_ts:
+                stuck_threshold = _STUCK_THRESHOLDS_SEC.get(key)
+                if stuck_threshold:
+                    start_dt = _parse_job_timestamp(start_ts)
+                    elapsed_sec = (datetime.now(timezone.utc).replace(tzinfo=None) - start_dt).total_seconds()
+                    is_stuck = elapsed_sec > stuck_threshold
+
+            plain = Text("  ".join(detail_parts), style="dim")
+            if is_stuck:
+                detail_text = Text.assemble(plain, ("  ⚠ taking longer than expected", "yellow"))
+            else:
+                detail_text = plain
+            table.add_row(icon, label_text, bar, detail_text)
+
+        return table
+
+    with Live(console=console, refresh_per_second=4) as live:
+        while True:
+            detail = current_job_detail(job_id)
+            status = detail.get("status", "")
+            live.update(_build_table(detail))
+            if status in _LIVE_TERMINAL:
+                break
+            time.sleep(2)
+
+
+def _print_timeline_summary(job_id: str) -> None:
+    detail = current_job_detail(job_id)
+    ts = detail.get("status_timestamps") or {}
+    if not ts:
+        return
+
+    STEP_LABELS = {
+        "queued":            "Waiting in queue",
+        "uploading":         "Uploading files",
+        "provisioning":      "Provisioning VM",
+        "staging":           "Staging files",
+        "running":           "Running",
+        "uploading_outputs": "Uploading outputs",
+        "completed":         "Completed",
+    }
+    STEP_ORDER = [
+        "queued", "uploading", "provisioning",
+        "staging", "running", "uploading_outputs", "completed",
+    ]
+
+    input_ds = detail.get("input_dataset") or {}
+
+    table = Table(title="Job Timeline", box=box.SIMPLE_HEAD)
+    table.add_column("Step", style="cyan")
+    table.add_column("Duration", style="yellow")
+    table.add_column("Details", style="dim")
+
+    for i, key in enumerate(STEP_ORDER):
+        if key not in ts:
+            continue
+        label = STEP_LABELS.get(key, key)
+        end_ts = next((ts[k] for k in STEP_ORDER[i + 1:] if k in ts), None)
+        duration = _fmt_duration(ts[key], end_ts) if end_ts else "—"
+        file_info = ""
+        if key in ("uploading", "staging") and input_ds.get("number_of_files"):
+            n = input_ds["number_of_files"]
+            sz = _fmt_bytes(input_ds.get("total_size") or 0)
+            file_info = f"{n} {'file' if n == 1 else 'files'} · {sz}"
+        table.add_row(label, duration, file_info)
+
+    console.print(table)
 
 
 def _print_env_build_failure(job_id: str) -> None:
@@ -443,56 +737,62 @@ def run_cmd(
                 }
             )
             
+    upload_state: dict | None = None
+    upload_thread: Thread | None = None
+
     if new_input_dataset:
-        # STEP 5: Create signed azure URLs for the file objects
-        with console.status(f"Creating Upload URLs for your files", spinner="dots12"):
-            
-            while not all_files_have_upload_links(
-                updated_job_response['public_id'], 
-                new_input_dataset['public_id'],
-                [f.get("public_id") for f in file_responses]
-            ):
-                time.sleep(4)
-
-            upload_links = api_client.get("/temporary_links", params={
-                "dataset_public_id": new_input_dataset['public_id'],
-                "job_public_id": updated_job_response['public_id'],
-                "link_type": "upload"
-            })
-
-            file_link_map = {link["file_public_id"]: link for link in upload_links}
-
-
-        # STEP 7: Upload the files to Azure
-        with console.status(f"Uploading Files to Thoa", spinner="dots12"):
-            
-            # Use the actual scanned local path, not FileModel.filename from the API,
-            # because dedup may reuse an existing file row with an old filename.
-            file_map = dict(local_path_by_public_id)
-
-            md5_map = {
-                public_id: all_hashes[Path(local_path)]
-                for public_id, local_path in local_path_by_public_id.items()
-            }
-
-            for file_public_id, link in file_link_map.items():
-
-                link_id = link["public_id"]
-                filename = file_map.get(file_public_id)
-
-                updated_links = api_client.put(
-                    f"/temporary_links/{link_id}",
-                    json={
-                        "client_path": filename
-                    }
-                )
-
-            upload_all(upload_links, file_map, md5_map, max_workers=max_threads)
-
-            while current_job_status(updated_job_response['public_id']) in UPLOAD_STATUSES:
-                time.sleep(4)
+        # Use the actual scanned local path, not FileModel.filename from the API,
+        # because dedup may reuse an existing file row with an old filename.
+        file_map = dict(local_path_by_public_id)
+        md5_map = {
+            public_id: all_hashes[Path(local_path)]
+            for public_id, local_path in local_path_by_public_id.items()
+        }
+        n_upload_files = len(file_responses)
+        total_upload_bytes = sum(file_sizes.values())
 
         if run_async:
+            # Async path: upload synchronously so the job is ready before we return.
+            _wait_queue(updated_job_response['public_id'])
+
+            with console.status("Creating upload URLs for your files", spinner="dots12"):
+                while not all_files_have_upload_links(
+                    updated_job_response['public_id'],
+                    new_input_dataset['public_id'],
+                    [f.get("public_id") for f in file_responses]
+                ):
+                    time.sleep(4)
+                upload_links = api_client.get("/temporary_links", params={
+                    "dataset_public_id": new_input_dataset['public_id'],
+                    "job_public_id": updated_job_response['public_id'],
+                    "link_type": "upload",
+                })
+                file_link_map = {link["file_public_id"]: link for link in upload_links}
+
+            for file_public_id, link in file_link_map.items():
+                api_client.put(
+                    f"/temporary_links/{link['public_id']}",
+                    json={"client_path": file_map.get(file_public_id)},
+                )
+
+            _size_str = _fmt_bytes(total_upload_bytes)
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[cyan]{task.description}[/cyan]"),
+                BarColumn(),
+                TimeElapsedColumn(),
+                console=console,
+            ) as up_progress:
+                up_task = up_progress.add_task(
+                    f"Uploading 0/{n_upload_files} files · {_size_str}",
+                    total=n_upload_files,
+                )
+                upload_all(
+                    upload_links, file_map, md5_map,
+                    max_workers=max_threads, progress=up_progress, task_id=up_task,
+                    n_total=n_upload_files, size_str=_size_str,
+                )
+
             console.print(Panel(
                 f"[bold green]Job submitted successfully![/bold green]\n\n"
                 f"[label]Job ID:[/label]    [value]{job_response['public_id']}[/value]\n"
@@ -505,48 +805,44 @@ def run_cmd(
             ))
             return
 
-        with console.status(f"Validating your environment", spinner="dots12"):
-            while current_job_status(updated_job_response['public_id']) == JobStatus.VALIDATING:
-                time.sleep(4)
+        else:
+            # Sync path: start upload in background so the live display covers all
+            # steps — queue waiting, uploading, provisioning — in one unified table.
+            upload_state = {
+                "n_done": 0,
+                "n_total": n_upload_files,
+                "size_str": _fmt_bytes(total_upload_bytes),
+            }
+            _job_id = updated_job_response['public_id']
+            _dataset_id = new_input_dataset['public_id']
+            _file_ids = [f.get("public_id") for f in file_responses]
 
-        if current_job_status(updated_job_response['public_id']) == JobStatus.FAILED_VALIDATION:
-            _print_env_build_failure(updated_job_response['public_id'])
-            raise typer.Exit(code=1)
+            def _run_upload() -> None:
+                while not all_files_have_upload_links(_job_id, _dataset_id, _file_ids):
+                    time.sleep(2)
+                links = api_client.get("/temporary_links", params={
+                    "dataset_public_id": _dataset_id,
+                    "job_public_id": _job_id,
+                    "link_type": "upload",
+                })
+                # The server may return fewer links than file_responses when some
+                # blobs already exist in storage (dedup). Correct the total now so
+                # the progress bar reflects the actual upload count.
+                actual_bytes = sum(
+                    file_sizes.get(Path(file_map.get(lnk["file_public_id"], "")), 0)
+                    for lnk in links
+                )
+                upload_state["n_total"] = len(links)
+                upload_state["size_str"] = _fmt_bytes(actual_bytes)
+                for link in links:
+                    api_client.put(
+                        f"/temporary_links/{link['public_id']}",
+                        json={"client_path": file_map.get(link["file_public_id"])},
+                    )
+                upload_all(links, file_map, md5_map, max_workers=max_threads, upload_state=upload_state)
 
-        # STEP 8: Poll the server for disk creation and copy status
-        with console.status(f"Staging your files", spinner="dots12"):
-            while current_job_status(updated_job_response['public_id']) == JobStatus.STAGING:
-                time.sleep(4)
-
-    if input_dataset and not new_input_dataset:
-        with console.status(f"Queuing your job", spinner="dots12"):
-            while current_job_status(updated_job_response['public_id']) in {JobStatus.CREATED, JobStatus.QUEUED}:
-                time.sleep(4)
-
-        with console.status(f"Validating your environment", spinner="dots12"):
-            while current_job_status(updated_job_response['public_id']) == JobStatus.VALIDATING:
-                time.sleep(4)
-
-        if current_job_status(updated_job_response['public_id']) == JobStatus.FAILED_VALIDATION:
-            _print_env_build_failure(updated_job_response['public_id'])
-            raise typer.Exit(code=1)
-
-        with console.status(f"Staging your data", spinner="dots12"):
-            while current_job_status(updated_job_response['public_id']) == JobStatus.STAGING:
-                time.sleep(4)
-
-    if not new_input_dataset and not input_dataset:
-        with console.status(f"Queuing your job", spinner="dots12"):
-            while current_job_status(updated_job_response['public_id']) in {JobStatus.CREATED, JobStatus.QUEUED}:
-                time.sleep(4)
-
-        with console.status(f"Validating your environment", spinner="dots12"):
-            while current_job_status(updated_job_response['public_id']) == JobStatus.VALIDATING:
-                time.sleep(4)
-
-        if current_job_status(updated_job_response['public_id']) == JobStatus.FAILED_VALIDATION:
-            _print_env_build_failure(updated_job_response['public_id'])
-            raise typer.Exit(code=1)
+            upload_thread = Thread(target=_run_upload, daemon=True)
+            upload_thread.start()
 
     if run_async:
         console.print(Panel(
@@ -560,55 +856,65 @@ def run_cmd(
         ))
         return
 
-    # STEP 9: Poll until the VM has been provisioned
-    with console.status(f"Spawning a Virtual Machine for your job", spinner="dots12"):
-        while current_job_status(updated_job_response['public_id']) == JobStatus.PROVISIONING:
-            time.sleep(4)
+    # Single unified live display covering all steps: queue → upload → provision → run
+    _live_job_progress(updated_job_response['public_id'], upload_state=upload_state)
 
-    if current_job_status(updated_job_response['public_id']) == JobStatus.FAILED_VALIDATION:
+    if upload_thread is not None:
+        upload_thread.join()
+
+    # Stream logs after the live display exits — job is already complete so all
+    # buffered log events replay instantly without interfering with the live table.
+    api_client.stream_logs_blocking(updated_job_response['public_id'], from_id="0-0")
+
+    final_status = current_job_status(updated_job_response['public_id'])
+    if final_status == JobStatus.FAILED_VALIDATION:
         _print_env_build_failure(updated_job_response['public_id'])
         raise typer.Exit(code=1)
-
-    # STEP 11: Wait until the VM is ready to stream logs, then connect
-    with console.status(f"Connecting to your job VM", spinner="dots12"):
-        while current_job_status(updated_job_response['public_id']) not in {
-            JobStatus.RUNNING, JobStatus.COMPLETED, JobStatus.FAILED_EXECUTION,
-            JobStatus.FAILED_STARTUP, JobStatus.CANCELLED, JobStatus.FAILED_VALIDATION
-        }:
-            time.sleep(4)
-
-    if current_job_status(updated_job_response['public_id']) == JobStatus.FAILED_VALIDATION:
-        _print_env_build_failure(updated_job_response['public_id'])
+    if final_status in {
+        JobStatus.FAILED_PROVISIONING, JobStatus.FAILED_STARTUP,
+        JobStatus.FAILED_EXECUTION, JobStatus.CANCELLED,
+    }:
+        console.print(f"[bold red]Job failed with status: {final_status}[/bold red]")
         raise typer.Exit(code=1)
 
-    api_client.stream_logs_blocking(job_response['public_id'], from_id="0-0")
 
-    # STEP 12: Download output files to the local machine
-    with console.status(f"Job Completed! Preparing your output dataset", spinner="dots12"):
-        while current_job_status(updated_job_response['public_id']) == JobStatus.CLEANUP:
-            time.sleep(4) 
-            if current_job_status(updated_job_response['public_id']) == JobStatus.COMPLETED:
-                break
 
-    with console.status(f"Downloading output files", spinner="dots12"):
-        if download_path:
-            job_with_output = api_client.get(f"/jobs?public_id={updated_job_response['public_id']}")[0]
-            output_dataset_id = job_with_output.get("output_dataset_public_id")
-            
-            output_links = api_client.get(
-                "/temporary_links", 
-                params={
-                    "dataset_public_id": output_dataset_id,
-                    "job_public_id": updated_job_response['public_id'],
-                    "link_type": "download_outputs"
-                }
-            )
+    _print_timeline_summary(updated_job_response['public_id'])
+
+    if download_path:
+        job_with_output = api_client.get(f"/jobs?public_id={updated_job_response['public_id']}")[0]
+        output_dataset_id = job_with_output.get("output_dataset_public_id")
+
+        if not output_dataset_id:
+            console.print("[yellow]No output dataset found for this job; skipping download.[/yellow]")
+            return
+
+        output_links = api_client.get(
+            "/temporary_links",
+            params={
+                "dataset_public_id": output_dataset_id,
+                "job_public_id": updated_job_response['public_id'],
+                "link_type": "download_outputs"
+            }
+        )
+
+        if not output_links:
+            console.print("[yellow]No output files available to download.[/yellow]")
+            return
+
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[cyan]Downloading output files[/cyan]"),
+            BarColumn(),
+            MofNCompleteColumn(),
+            TimeElapsedColumn(),
+            console=console,
+        ) as dl_progress:
+            dl_task = dl_progress.add_task("download", total=len(output_links))
 
             for link in output_links:
-
                 remote_output_path_parent = Path(output)
-                local_output_path = Path(download_path) 
-
+                local_output_path = Path(download_path)
                 remote_link_path = Path(link.get("client_path"))
                 local_link_path = Path(str(remote_link_path).replace(str(remote_output_path_parent), str(local_output_path)))
 
@@ -618,22 +924,20 @@ def run_cmd(
                 try:
                     sas_url = link["url"]
                     blob = BlobClient.from_blob_url(sas_url)
-                    print(f"[DOWNLOAD] {blob.blob_name} -> {local_link_path}")
                     stream = blob.download_blob(max_concurrency=4)
                     with open(local_link_path, "wb") as fh:
                         for chunk in stream.chunks():
                             fh.write(chunk)
-
-                    # Optional: verify MD5 if uploader set it in metadata
                     try:
                         remote_md5 = (blob.get_blob_properties().metadata or {}).get("md5")
                         if remote_md5:
                             local_md5 = compute_md5_buffered(local_link_path)
                             if local_md5 != remote_md5:
-                                print(f"[WARN] MD5 mismatch for {local_link_path.name}: remote={remote_md5} local={local_md5}")
+                                console.print(f"[yellow]MD5 mismatch for {local_link_path.name}[/yellow]")
                     except Exception:
                         pass
-                    print(f"[SUCCESS] Downloaded {local_link_path}")
                 except Exception as e:
-                    print(f"[ERROR] Failed to download from {sas_url}: {e}")
+                    console.print(f"[red]Failed to download: {e}[/red]")
+                finally:
+                    dl_progress.advance(dl_task)
                 

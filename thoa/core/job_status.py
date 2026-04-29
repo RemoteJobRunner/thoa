@@ -17,6 +17,7 @@ class JobStatus(StrEnum):
     FAILED_EXECUTION = "failed_execution"
     FAILED_STARTUP = "failed_startup"
     CLEANUP = "cleanup"
+    UPLOADING_OUTPUTS = "uploading_outputs"
     CANCELLED = "cancelled"
     ARCHIVED = "archived"
 

@@ -170,14 +170,26 @@ def file_sizes_in_bytes(paths, follow_symlinks=True):
 
 def current_job_status(job_id: str):
     """Fetch the current status of a job by its public ID."""
-    
+
     results = api_client.get(f"/jobs?public_id={job_id}")
     response = results[0] if results else {}
-    
+
     if response is None:
         raise ValueError(f"Job with ID {job_id} not found or invalid.")
 
     return response.get("status", "unknown")
+
+
+def current_job_response(job_id: str) -> dict:
+    """Fetch the full job response dict (includes files_staged, files_total, status)."""
+    results = api_client.get(f"/jobs?public_id={job_id}")
+    return results[0] if results else {}
+
+
+def current_job_detail(job_id: str) -> dict:
+    """Fetch full job detail (includes queue_position, queue_total)."""
+    result = api_client.get(f"/jobs/{job_id}/detail")
+    return result or {}
 
 
 def all_files_have_upload_links(job_id, input_dataset_id, file_public_ids):
@@ -226,14 +238,25 @@ def upload_file_sas(local_path: Path, sas_url: str, local_md5: str, max_concurre
         # Apply updated metadata
         blob_client.set_blob_metadata(metadata)
 
-        # print(f"[SUCCESS] Uploaded {local_path.name} to {blob_client.blob_name}")
-        print(f"[SUCCESS] Uploaded {local_path.name} to Thoa")
     except Exception as e:
-        print(f"[ERROR] Failed to upload {local_path.name}: {e}")
         raise
 
 
-def upload_all(upload_links, local_file_map, all_md5s, max_workers=4):
+def upload_all(upload_links, local_file_map, all_md5s, max_workers=4, upload_state=None, progress=None, task_id=None, n_total=None, size_str=None):
+    n_done = 0
+    _n_total = n_total if n_total is not None else len(upload_links)
+
+    def _advance():
+        nonlocal n_done
+        n_done += 1
+        if upload_state is not None:
+            upload_state["n_done"] = n_done
+        elif progress is not None and task_id is not None:
+            desc = f"Uploading {n_done}/{_n_total} files"
+            if size_str:
+                desc += f" · {size_str}"
+            progress.update(task_id, advance=1, description=desc)
+
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = []
 
@@ -243,12 +266,12 @@ def upload_all(upload_links, local_file_map, all_md5s, max_workers=4):
             local_md5 = all_md5s.get(file_id)
 
             if not local_path.exists():
-                print(f"[WARN] File missing: {file_id} -> {local_path}")
+                _advance()
                 continue
 
             # Skip upload if hash already matches
             if blob_exists_with_same_md5(link["url"], local_md5, local_path):
-                print(f"[SKIP] {local_path.name} already uploaded with matching MD5")
+                _advance()
                 continue
 
             futures.append(executor.submit(upload_file_sas, local_path, link["url"], local_md5))
@@ -257,7 +280,8 @@ def upload_all(upload_links, local_file_map, all_md5s, max_workers=4):
             try:
                 future.result()
             except Exception:
-                pass 
+                pass
+            _advance()
 
 
 def blob_exists_with_same_md5(sas_url: str, local_md5: str, local_path: Path | None = None) -> bool:
@@ -294,18 +318,16 @@ def blob_exists_with_same_md5(sas_url: str, local_md5: str, local_path: Path | N
 
 # Timestamp helpers
 def _parse_job_timestamp(ts: str):
-    """Return a datetime object parsed from an ISO timestamp."""
+    """Return a naive UTC datetime parsed from an ISO timestamp."""
     if not ts:
         return None
-    formats = [
-        "%Y-%m-%dT%H:%M:%S.%fZ",
-        "%Y-%m-%dT%H:%M:%SZ",
-        "%Y-%m-%dT%H:%M:%S.%f",
-        "%Y-%m-%dT%H:%M:%S",
-    ]
-    for fmt in formats:
+    # Strip timezone suffix so all variants produce a naive datetime for
+    # consistent arithmetic (backend stores UTC without suffix; datetime.now(utc)
+    # produces +00:00 which strptime doesn't handle uniformly across versions).
+    normalized = ts.replace("Z", "").replace("+00:00", "")
+    for fmt in ("%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S"):
         try:
-            return datetime.strptime(ts, fmt)
+            return datetime.strptime(normalized, fmt)
         except ValueError:
             pass
     return None

@@ -21,11 +21,13 @@ def _patch_api_client(base_url: str, api_key: str) -> None:
     import thoa.core.dataset_utils as _ds
     import thoa.core.job_utils as _jobs
     import thoa.cli.commands.run as _run
+    import thoa.cli.commands.jobs as _jobs_cmd
 
     client = ApiClient(base_url=base_url, api_key=api_key)
     _ds.client = client
     _jobs.api_client = client
     _run.api_client = client
+    _jobs_cmd.api_client = client
 
 
 @pytest.fixture(scope="session")

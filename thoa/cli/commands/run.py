@@ -728,6 +728,12 @@ def run_cmd(
                 found_next = True
                 break
         if not found_next:
+            # Fetch the latest attempt to surface any AI diagnosis note
+            fresh_attempts = _get_attempts()
+            last_attempt = fresh_attempts[-1] if fresh_attempts else None
+            ai_note = (last_attempt or {}).get('ai_note') or ''
+            if ai_note:
+                console.print(f"\n[yellow]AI diagnosis:[/yellow] {ai_note}")
             console.print("[red]No further attempts. Job failed.[/red]")
             break
 

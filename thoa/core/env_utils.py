@@ -1,20 +1,17 @@
 from typing import Optional
 import os
 import platform
+import subprocess
 import sys
+import yaml
 from rich.console import Console
 from rich.panel import Panel
 
 console = Console()
 
-def _requirements_txt_to_conda_yaml(path: str) -> str:
-    """Convert a requirements.txt file to a conda environment YAML string."""
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            lines = f.readlines()
-    except Exception as e:
-        raise IOError(f"Failed to read requirements file: {e}")
 
+def _pip_lines_to_conda_yaml(lines: list[str]) -> str:
+    """Convert a list of requirements-format lines to a conda environment YAML string."""
     pip_deps = []
     for line in lines:
         line = line.strip()
@@ -24,15 +21,66 @@ def _requirements_txt_to_conda_yaml(path: str) -> str:
         pip_deps.append(line)
 
     if not pip_deps:
-        raise ValueError(f"No packages found in requirements file: {path}")
+        raise ValueError("No packages found in requirements.")
 
-    import yaml
     spec = {
         "name": "env",
         "channels": ["conda-forge", "bioconda", "defaults"],
         "dependencies": ["pip", {"pip": pip_deps}],
     }
     return yaml.dump(spec, sort_keys=False, default_flow_style=False)
+
+
+def _requirements_txt_to_conda_yaml(path: str) -> str:
+    """Convert a requirements.txt file to a conda environment YAML string."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+    except Exception as e:
+        raise IOError(f"Failed to read requirements file: {e}")
+
+    try:
+        return _pip_lines_to_conda_yaml(lines)
+    except ValueError:
+        raise ValueError(f"No packages found in requirements file: {path}")
+
+
+def _capture_current_environment() -> str:
+    """
+    Capture the active Python environment as a conda YAML string.
+
+    Priority:
+      1. Non-base conda env  → `conda env export --no-builds`
+      2. Everything else     → `pip freeze` on the current Python interpreter
+    """
+    conda_env = os.environ.get("CONDA_DEFAULT_ENV")
+    conda_prefix = os.environ.get("CONDA_PREFIX")
+
+    if conda_prefix and conda_env and conda_env != "base":
+        try:
+            result = subprocess.run(
+                ["conda", "env", "export", "--no-builds"],
+                capture_output=True, text=True, check=True,
+            )
+            return result.stdout
+        except FileNotFoundError:
+            raise RuntimeError("conda not found in PATH; cannot export environment.")
+        except subprocess.CalledProcessError as e:
+            raise RuntimeError(f"conda env export failed: {e.stderr.strip()}")
+
+    # Venv, conda base, or bare system Python — all handled via pip freeze
+    try:
+        result = subprocess.run(
+            [sys.executable, "-m", "pip", "freeze"],
+            capture_output=True, text=True, check=True,
+        )
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(f"pip freeze failed: {e.stderr.strip()}")
+
+    if not result.stdout.strip():
+        raise ValueError("Current environment has no installed packages (pip freeze returned empty).")
+
+    return _pip_lines_to_conda_yaml(result.stdout.splitlines())
 
 
 def resolve_environment_spec(env_source: Optional[str]) -> str:
@@ -57,6 +105,9 @@ def resolve_environment_spec(env_source: Optional[str]) -> str:
         return ""
 
     env_source = str(env_source)
+
+    if env_source == "use-current":
+        return _capture_current_environment()
 
     if not env_source.endswith((".yml", ".yaml", ".txt")):
         raise ValueError(f"Unsupported environment source format: {env_source}. Expected .yml, .yaml, or .txt (requirements).")

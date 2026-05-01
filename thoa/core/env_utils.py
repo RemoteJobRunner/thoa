@@ -80,7 +80,17 @@ def _capture_current_environment() -> str:
     if not result.stdout.strip():
         raise ValueError("Current environment has no installed packages (pip freeze returned empty).")
 
-    return _pip_lines_to_conda_yaml(result.stdout.splitlines())
+    pip_yaml = _pip_lines_to_conda_yaml(result.stdout.splitlines())
+
+    # Inject the exact Python version so conda picks the right interpreter
+    import yaml as _yaml
+    spec = _yaml.safe_load(pip_yaml)
+    py = f"python>={sys.version_info.major}.{sys.version_info.minor}"
+    deps = spec.get("dependencies", [])
+    if not any(isinstance(d, str) and d.startswith("python") for d in deps):
+        deps.insert(0, py)
+    spec["dependencies"] = deps
+    return _yaml.dump(spec, sort_keys=False, default_flow_style=False)
 
 
 def resolve_environment_spec(env_source: Optional[str]) -> str:

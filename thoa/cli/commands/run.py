@@ -63,6 +63,39 @@ def _print_env_build_failure(job_id: str) -> None:
         pass
 
 
+def _handle_validation_failure(job_public_id: str) -> bool:
+    """
+    Called immediately after detecting FAILED_VALIDATION.
+    Waits up to 60 s for the AI to trigger a retry with a corrected environment.
+    Returns True if the AI retried and validation passed (caller should continue).
+    Returns False if validation permanently failed (caller should exit).
+    """
+    _print_env_build_failure(job_public_id)
+
+    with console.status("Waiting to see if AI will auto-retry the environment...", spinner="dots12"):
+        deadline = time.time() + 60
+        while time.time() < deadline:
+            time.sleep(5)
+            if current_job_status(job_public_id) != JobStatus.FAILED_VALIDATION:
+                break
+        else:
+            return False  # timed out — no AI retry
+
+    console.print("[yellow]AI is retrying with a corrected environment...[/yellow]")
+
+    with console.status("Re-validating corrected environment...", spinner="dots12"):
+        while current_job_status(job_public_id) in {
+            JobStatus.VALIDATING, JobStatus.QUEUED, JobStatus.PENDING, JobStatus.CREATED,
+        }:
+            time.sleep(4)
+
+    if current_job_status(job_public_id) == JobStatus.FAILED_VALIDATION:
+        _print_env_build_failure(job_public_id)
+        return False  # second failure — give up
+
+    return True  # validation passed, caller continues normal flow
+
+
 def _print_dry_run_summary(
     n_files: int,
     total_size_bytes: int,
@@ -576,8 +609,8 @@ def run_cmd(
                 time.sleep(4)
 
         if current_job_status(updated_job_response['public_id']) == JobStatus.FAILED_VALIDATION:
-            _print_env_build_failure(updated_job_response['public_id'])
-            raise typer.Exit(code=1)
+            if not _handle_validation_failure(updated_job_response['public_id']):
+                raise typer.Exit(code=1)
 
         # STEP 8: Poll the server for disk creation and copy status
         with console.status(f"Staging your files", spinner="dots12"):
@@ -594,8 +627,8 @@ def run_cmd(
                 time.sleep(4)
 
         if current_job_status(updated_job_response['public_id']) == JobStatus.FAILED_VALIDATION:
-            _print_env_build_failure(updated_job_response['public_id'])
-            raise typer.Exit(code=1)
+            if not _handle_validation_failure(updated_job_response['public_id']):
+                raise typer.Exit(code=1)
 
         with console.status(f"Staging your data", spinner="dots12"):
             while current_job_status(updated_job_response['public_id']) == JobStatus.STAGING:
@@ -611,8 +644,8 @@ def run_cmd(
                 time.sleep(4)
 
         if current_job_status(updated_job_response['public_id']) == JobStatus.FAILED_VALIDATION:
-            _print_env_build_failure(updated_job_response['public_id'])
-            raise typer.Exit(code=1)
+            if not _handle_validation_failure(updated_job_response['public_id']):
+                raise typer.Exit(code=1)
 
     if run_async:
         console.print(Panel(
@@ -632,8 +665,8 @@ def run_cmd(
             time.sleep(4)
 
     if current_job_status(updated_job_response['public_id']) == JobStatus.FAILED_VALIDATION:
-        _print_env_build_failure(updated_job_response['public_id'])
-        raise typer.Exit(code=1)
+        if not _handle_validation_failure(updated_job_response['public_id']):
+            raise typer.Exit(code=1)
 
     # STEP 11: Wait until the VM is ready to stream logs, then connect
     with console.status(f"Connecting to your job VM", spinner="dots12"):
@@ -644,8 +677,8 @@ def run_cmd(
             time.sleep(4)
 
     if current_job_status(updated_job_response['public_id']) == JobStatus.FAILED_VALIDATION:
-        _print_env_build_failure(updated_job_response['public_id'])
-        raise typer.Exit(code=1)
+        if not _handle_validation_failure(updated_job_response['public_id']):
+            raise typer.Exit(code=1)
 
     # STEP 11b: Stream logs for each attempt, following AI retries
     job_public_id = job_response['public_id']

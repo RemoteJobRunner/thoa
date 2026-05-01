@@ -1,4 +1,9 @@
-from enum import StrEnum
+try:
+    from enum import StrEnum
+except ImportError:
+    from enum import Enum
+    class StrEnum(str, Enum):  # Python 3.10 backport
+        pass
 
 
 class JobStatus(StrEnum):

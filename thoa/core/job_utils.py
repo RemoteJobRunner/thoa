@@ -13,7 +13,7 @@ from rich import box
 from thoa.core import resolve_environment_spec
 from concurrent.futures import ThreadPoolExecutor
 from threading import Thread
-from datetime import datetime
+from datetime import datetime, timezone
 
 import concurrent.futures
 from azure.storage.blob import BlobClient
@@ -245,6 +245,7 @@ def upload_file_sas(local_path: Path, sas_url: str, local_md5: str, max_concurre
 def upload_all(upload_links, local_file_map, all_md5s, max_workers=4, upload_state=None, progress=None, task_id=None, n_total=None, size_str=None):
     n_done = 0
     _n_total = n_total if n_total is not None else len(upload_links)
+    missing_paths = []
 
     def _advance():
         nonlocal n_done
@@ -266,6 +267,7 @@ def upload_all(upload_links, local_file_map, all_md5s, max_workers=4, upload_sta
             local_md5 = all_md5s.get(file_id)
 
             if not local_path.exists():
+                missing_paths.append(local_path)
                 _advance()
                 continue
 
@@ -282,6 +284,8 @@ def upload_all(upload_links, local_file_map, all_md5s, max_workers=4, upload_sta
             except Exception:
                 pass
             _advance()
+
+    return missing_paths
 
 
 def blob_exists_with_same_md5(sas_url: str, local_md5: str, local_path: Path | None = None) -> bool:
@@ -318,16 +322,13 @@ def blob_exists_with_same_md5(sas_url: str, local_md5: str, local_path: Path | N
 
 # Timestamp helpers
 def _parse_job_timestamp(ts: str):
-    """Return a naive UTC datetime parsed from an ISO timestamp."""
+    """Return an aware UTC datetime parsed from an ISO timestamp."""
     if not ts:
         return None
-    # Strip timezone suffix so all variants produce a naive datetime for
-    # consistent arithmetic (backend stores UTC without suffix; datetime.now(utc)
-    # produces +00:00 which strptime doesn't handle uniformly across versions).
     normalized = ts.replace("Z", "").replace("+00:00", "")
     for fmt in ("%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S"):
         try:
-            return datetime.strptime(normalized, fmt)
+            return datetime.strptime(normalized, fmt).replace(tzinfo=timezone.utc)
         except ValueError:
             pass
     return None

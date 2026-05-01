@@ -86,24 +86,32 @@ def _wait_queue(job_id: str) -> None:
 
 
 _LIVE_STEPS = [
-    ("queued",            "Waiting in queue",   "< 1 min"),
-    ("uploading",         "Uploading files",    "< 1 min"),
-    ("provisioning",      "Provisioning VM",    "~2–4 min"),
-    ("staging",           "Staging files",      "~1–2 min"),
+    ("queued",            "Waiting in queue",   None),
+    ("uploading",         "Uploading files",    None),
+    ("provisioning",      "Provisioning VM",    None),
+    ("staging",           "Staging files",      None),
     ("running",           "Running",            None),
-    ("uploading_outputs", "Uploading outputs",  "~1 min"),
+    ("uploading_outputs", "Uploading outputs",  None),
     ("completed",         "Completed",          None),
 ]
 
-# Estimated duration per step in seconds, used to drive the progress bars.
-# "running" is intentionally absent — it's a black box with no predictable duration.
-_STEP_ESTIMATES_SEC = {
-    "queued":            30,
-    "uploading":         45,
-    "provisioning":      180,   # midpoint of the displayed ~2–4 min estimate
-    "staging":           90,
-    "uploading_outputs": 60,
-}
+_STAGING_BASE_SEC = 56
+_STAGING_BPS      = 85 * 1024 * 1024
+
+
+def _estimate_secs(key: str, total_bytes: int, queue_pos: int | None = None) -> int | None:
+    if key == "staging": return int(_STAGING_BASE_SEC + total_bytes / _STAGING_BPS)
+    if key == "queued":  return 30 if (queue_pos is None or queue_pos == 1) else None
+    return {"provisioning": 180}.get(key)
+
+
+def _fmt_estimate(secs: int | None) -> str | None:
+    if secs is None: return None
+    if secs < 60:    return "< 1 min"
+    mins = round(secs / 60)
+    if mins < 60:    return f"~{mins} min"
+    h, m = divmod(mins, 60)
+    return f"~{h}h {m}m" if m else f"~{h}h"
 
 # If a step exceeds this many seconds, show a "taking longer than expected" warning.
 # Only steps whose duration is independent of job/data size are included.
@@ -149,11 +157,14 @@ def _live_job_progress(job_id: str, upload_state: dict | None = None) -> None:
         finished_at = detail.get("finished_at")
         queue_pos = detail.get("queue_position")
         input_ds = detail.get("input_dataset") or {}
+        total_bytes = input_ds.get("total_size") or 0
 
-        if status == "cancelled":
-            # Find the last step that actually ran so completed steps still show green.
-            failed_step = next((k for k in reversed(_LIVE_STEP_KEYS) if ts.get(k)), "queued")
+        is_cancelled = status == "cancelled"
+        if is_cancelled:
+            interrupted_step = next((k for k in reversed(_LIVE_STEP_KEYS) if ts.get(k)), "queued")
+            failed_step = None
         else:
+            interrupted_step = None
             failed_step = _LIVE_FAILURE_STEP.get(status)
         is_complete = status in ("completed", "archived")
 
@@ -163,11 +174,22 @@ def _live_job_progress(job_id: str, upload_state: dict | None = None) -> None:
         table.add_column("bar", no_wrap=True, width=22)
         table.add_column("detail")
 
-        for (key, label, estimate) in _LIVE_STEPS:
+        for (key, label, _) in _LIVE_STEPS:
+            est_sec  = _estimate_secs(key, total_bytes, queue_pos)
+            estimate = _fmt_estimate(est_sec)
             start_ts = ts.get(key)
 
             if is_complete:
                 state = "done" if start_ts else "skip"
+            elif interrupted_step:
+                interrupted_idx = _LIVE_STEP_KEYS.index(interrupted_step)
+                this_idx = _LIVE_STEP_KEYS.index(key)
+                if key == interrupted_step:
+                    state = "cancelled"
+                elif this_idx < interrupted_idx:
+                    state = "done" if start_ts else "skip"
+                else:
+                    state = "skip"
             elif failed_step:
                 failed_idx = _LIVE_STEP_KEYS.index(failed_step)
                 this_idx = _LIVE_STEP_KEYS.index(key)
@@ -195,10 +217,12 @@ def _live_job_progress(job_id: str, upload_state: dict | None = None) -> None:
                 icon = Spinner("dots", style="cyan")
             elif state == "failed":
                 icon = Text("✗", style="bold red")
+            elif state == "cancelled":
+                icon = Text("⊘", style="bold yellow")
             else:
                 icon = Text("·", style="dim")
 
-            style_map = {"done": "green", "active": "bold cyan", "failed": "red", "pending": "dim"}
+            style_map = {"done": "green", "active": "bold cyan", "failed": "red", "cancelled": "yellow", "pending": "dim"}
             label_text = Text(label, style=style_map[state])
 
             # Progress bar — "running" is a black box so no bar is shown.
@@ -214,8 +238,8 @@ def _live_job_progress(job_id: str, upload_state: dict | None = None) -> None:
                     pct = int((files_staged / files_total) * 100)
                 elif start_ts:
                     start_dt = _parse_job_timestamp(start_ts)
-                    elapsed = (datetime.now(timezone.utc).replace(tzinfo=None) - start_dt).total_seconds()
-                    est_sec = _STEP_ESTIMATES_SEC.get(key, 60)
+                    elapsed = (datetime.now(timezone.utc) - start_dt).total_seconds()
+                    est_sec = est_sec or 60
                     pct = int(min(elapsed / est_sec, 0.95) * 100)
                 else:
                     pct = 0
@@ -223,6 +247,9 @@ def _live_job_progress(job_id: str, upload_state: dict | None = None) -> None:
             elif state == "failed":
                 bar = ProgressBar(total=100, completed=100, width=20,
                                   complete_style="red", finished_style="red")
+            elif state == "cancelled":
+                bar = ProgressBar(total=100, completed=100, width=20,
+                                  complete_style="yellow", finished_style="yellow")
             else:  # pending
                 bar = ProgressBar(total=100, completed=0, width=20, style="bar.back")
 
@@ -269,6 +296,8 @@ def _live_job_progress(job_id: str, upload_state: dict | None = None) -> None:
                     detail_parts.append(f"est. {estimate}")
             elif state == "failed":
                 detail_parts.append("failed")
+            elif state == "cancelled":
+                detail_parts.append("cancelled")
 
             # Stuck-step warning: append after other detail parts so it's visible
             is_stuck = False
@@ -276,7 +305,7 @@ def _live_job_progress(job_id: str, upload_state: dict | None = None) -> None:
                 stuck_threshold = _STUCK_THRESHOLDS_SEC.get(key)
                 if stuck_threshold:
                     start_dt = _parse_job_timestamp(start_ts)
-                    elapsed_sec = (datetime.now(timezone.utc).replace(tzinfo=None) - start_dt).total_seconds()
+                    elapsed_sec = (datetime.now(timezone.utc) - start_dt).total_seconds()
                     is_stuck = elapsed_sec > stuck_threshold
 
             plain = Text("  ".join(detail_parts), style="dim")
@@ -787,11 +816,14 @@ def run_cmd(
                     f"Uploading 0/{n_upload_files} files · {_size_str}",
                     total=n_upload_files,
                 )
-                upload_all(
+                missing = upload_all(
                     upload_links, file_map, md5_map,
                     max_workers=max_threads, progress=up_progress, task_id=up_task,
                     n_total=n_upload_files, size_str=_size_str,
                 )
+
+            for p in missing:
+                console.print(f"[yellow]⚠ File not found, skipped: {p}[/yellow]")
 
             console.print(Panel(
                 f"[bold green]Job submitted successfully![/bold green]\n\n"
@@ -839,7 +871,7 @@ def run_cmd(
                         f"/temporary_links/{link['public_id']}",
                         json={"client_path": file_map.get(link["file_public_id"])},
                     )
-                upload_all(links, file_map, md5_map, max_workers=max_threads, upload_state=upload_state)
+                upload_state["missing_files"] = upload_all(links, file_map, md5_map, max_workers=max_threads, upload_state=upload_state)
 
             upload_thread = Thread(target=_run_upload, daemon=True)
             upload_thread.start()
@@ -862,6 +894,10 @@ def run_cmd(
     if upload_thread is not None:
         upload_thread.join()
 
+    if upload_state:
+        for p in upload_state.get("missing_files", []):
+            console.print(f"[yellow]⚠ File not found, skipped: {p}[/yellow]")
+
     # Stream logs after the live display exits — job is already complete so all
     # buffered log events replay instantly without interfering with the live table.
     api_client.stream_logs_blocking(updated_job_response['public_id'], from_id="0-0")
@@ -870,9 +906,12 @@ def run_cmd(
     if final_status == JobStatus.FAILED_VALIDATION:
         _print_env_build_failure(updated_job_response['public_id'])
         raise typer.Exit(code=1)
+    if final_status == JobStatus.CANCELLED:
+        console.print("[bold yellow]Job was cancelled.[/bold yellow]")
+        raise typer.Exit(code=1)
     if final_status in {
         JobStatus.FAILED_PROVISIONING, JobStatus.FAILED_STARTUP,
-        JobStatus.FAILED_EXECUTION, JobStatus.CANCELLED,
+        JobStatus.FAILED_EXECUTION,
     }:
         console.print(f"[bold red]Job failed with status: {final_status}[/bold red]")
         raise typer.Exit(code=1)
@@ -902,42 +941,30 @@ def run_cmd(
             console.print("[yellow]No output files available to download.[/yellow]")
             return
 
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[cyan]Downloading output files[/cyan]"),
-            BarColumn(),
-            MofNCompleteColumn(),
-            TimeElapsedColumn(),
-            console=console,
-        ) as dl_progress:
-            dl_task = dl_progress.add_task("download", total=len(output_links))
+        for link in output_links:
+            remote_output_path_parent = Path(output)
+            local_output_path = Path(download_path)
+            remote_link_path = Path(link.get("client_path"))
+            local_link_path = Path(str(remote_link_path).replace(str(remote_output_path_parent), str(local_output_path)))
 
-            for link in output_links:
-                remote_output_path_parent = Path(output)
-                local_output_path = Path(download_path)
-                remote_link_path = Path(link.get("client_path"))
-                local_link_path = Path(str(remote_link_path).replace(str(remote_output_path_parent), str(local_output_path)))
+            if not local_link_path.parent.exists():
+                local_link_path.parent.mkdir(parents=True, exist_ok=True)
 
-                if not local_link_path.parent.exists():
-                    local_link_path.parent.mkdir(parents=True, exist_ok=True)
-
+            try:
+                sas_url = link["url"]
+                blob = BlobClient.from_blob_url(sas_url)
+                stream = blob.download_blob(max_concurrency=4)
+                with open(local_link_path, "wb") as fh:
+                    for chunk in stream.chunks():
+                        fh.write(chunk)
                 try:
-                    sas_url = link["url"]
-                    blob = BlobClient.from_blob_url(sas_url)
-                    stream = blob.download_blob(max_concurrency=4)
-                    with open(local_link_path, "wb") as fh:
-                        for chunk in stream.chunks():
-                            fh.write(chunk)
-                    try:
-                        remote_md5 = (blob.get_blob_properties().metadata or {}).get("md5")
-                        if remote_md5:
-                            local_md5 = compute_md5_buffered(local_link_path)
-                            if local_md5 != remote_md5:
-                                console.print(f"[yellow]MD5 mismatch for {local_link_path.name}[/yellow]")
-                    except Exception:
-                        pass
-                except Exception as e:
-                    console.print(f"[red]Failed to download: {e}[/red]")
-                finally:
-                    dl_progress.advance(dl_task)
+                    remote_md5 = (blob.get_blob_properties().metadata or {}).get("md5")
+                    if remote_md5:
+                        local_md5 = compute_md5_buffered(local_link_path)
+                        if local_md5 != remote_md5:
+                            console.print(f"[yellow]MD5 mismatch for {local_link_path.name}[/yellow]")
+                except Exception:
+                    pass
+            except Exception as e:
+                console.print(f"[red]Failed to download: {e}[/red]")
                 

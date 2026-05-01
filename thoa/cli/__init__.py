@@ -50,7 +50,7 @@ def run_cmd(
         None, "--tools", help="List of tools (e.g., bwa, samtools=1.9). Use multiple flags or comma-separated values."
     ),
     env_source: Optional[Path] = typer.Option(
-        None, "--env-source", help="Environment specifier (e.g., environment.yml, env-name)."
+        None, "--env-source", help="Path to an environment file: conda environment.yml or pip requirements.txt."
     ),
     env_id: Optional[str] = typer.Option(
         None, "--env-id", help="UUID of an existing environment to reuse (mutually exclusive with --tools and --env-source)."

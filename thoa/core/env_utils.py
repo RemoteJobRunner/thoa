@@ -7,20 +7,49 @@ from rich.panel import Panel
 
 console = Console()
 
+def _requirements_txt_to_conda_yaml(path: str) -> str:
+    """Convert a requirements.txt file to a conda environment YAML string."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+    except Exception as e:
+        raise IOError(f"Failed to read requirements file: {e}")
+
+    pip_deps = []
+    for line in lines:
+        line = line.strip()
+        # skip blanks, comments, and pip options (e.g. -r, --index-url)
+        if not line or line.startswith("#") or line.startswith("-"):
+            continue
+        pip_deps.append(line)
+
+    if not pip_deps:
+        raise ValueError(f"No packages found in requirements file: {path}")
+
+    import yaml
+    spec = {
+        "name": "env",
+        "channels": ["conda-forge", "bioconda", "defaults"],
+        "dependencies": ["pip", {"pip": pip_deps}],
+    }
+    return yaml.dump(spec, sort_keys=False, default_flow_style=False)
+
+
 def resolve_environment_spec(env_source: Optional[str]) -> str:
     """
     Resolve the environment specification from a given source.
 
-    If the source is a path to a YAML file (e.g., environment.yml), this function reads and returns its contents as a string.
+    Accepts a conda environment YAML (.yml/.yaml) or a pip requirements
+    file (.txt), which is converted to a conda environment YAML string.
 
     Args:
-        env_source (str): The source of the environment specification, such as a file path or environment name.
+        env_source (str): Path to an environment.yml or requirements.txt file.
 
     Returns:
-        str: The resolved environment specification.
+        str: The resolved environment specification as a conda YAML string.
 
     Raises:
-        ValueError: If env_source is None or does not point to a valid .yml/.yaml file.
+        ValueError: If env_source is None or the file format is unsupported.
         FileNotFoundError: If the specified file does not exist.
         IOError: If the file cannot be read.
     """
@@ -29,11 +58,14 @@ def resolve_environment_spec(env_source: Optional[str]) -> str:
 
     env_source = str(env_source)
 
-    if not env_source.endswith((".yml", ".yaml")):
-        raise ValueError(f"Unsupported environment source format: {env_source}")
+    if not env_source.endswith((".yml", ".yaml", ".txt")):
+        raise ValueError(f"Unsupported environment source format: {env_source}. Expected .yml, .yaml, or .txt (requirements).")
 
     if not os.path.isfile(env_source):
         raise FileNotFoundError(f"Environment file not found: {env_source}")
+
+    if env_source.endswith(".txt"):
+        return _requirements_txt_to_conda_yaml(env_source)
 
     try:
         with open(env_source, "r", encoding="utf-8") as f:

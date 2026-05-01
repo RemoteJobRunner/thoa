@@ -66,26 +66,36 @@ def _print_env_build_failure(job_id: str) -> None:
 def _handle_validation_failure(job_public_id: str) -> bool:
     """
     Called immediately after detecting FAILED_VALIDATION.
-    Waits up to 60 s for the AI to trigger a retry with a corrected environment.
-    Returns True if the AI retried and validation passed (caller should continue).
-    Returns False if validation permanently failed (caller should exit).
+    Waits for the job to enter RETRYING (AI is working), then waits for it to resolve.
+    Returns True if the AI fixed it and the caller should continue.
+    Returns False if validation permanently failed.
     """
     _print_env_build_failure(job_public_id)
 
-    with console.status("Waiting to see if AI will auto-retry the environment...", spinner="dots12"):
-        deadline = time.time() + 60
+    # Wait up to 20 s for the flow to set the status to RETRYING (hook fires quickly)
+    with console.status("Waiting for AI to analyze the environment failure...", spinner="dots12"):
+        deadline = time.time() + 20
         while time.time() < deadline:
-            time.sleep(5)
+            time.sleep(3)
             if current_job_status(job_public_id) != JobStatus.FAILED_VALIDATION:
                 break
         else:
-            return False  # timed out — no AI retry
+            return False  # AI never picked it up
+
+        # Now wait while the AI is actively working
+        while current_job_status(job_public_id) == JobStatus.RETRYING:
+            time.sleep(3)
+
+    if current_job_status(job_public_id) == JobStatus.FAILED_VALIDATION:
+        _print_env_build_failure(job_public_id)
+        return False  # AI couldn't fix it
 
     console.print("[yellow]AI is retrying with a corrected environment...[/yellow]")
 
     with console.status("Re-validating corrected environment...", spinner="dots12"):
         while current_job_status(job_public_id) in {
             JobStatus.VALIDATING, JobStatus.QUEUED, JobStatus.PENDING, JobStatus.CREATED,
+            JobStatus.STAGING, JobStatus.PROVISIONING,
         }:
             time.sleep(4)
 
@@ -749,17 +759,22 @@ def run_cmd(
         if succeeded:
             break
 
-        # Failure — print message and wait to see if AI creates another attempt
-        console.print(f"\n[bold red]Attempt {n} failed.[/bold red] Waiting to see if AI will retry...")
-        # Give AI intervention up to 60 s to create the next attempt
-        deadline = time.time() + 60
+        # Failure — wait while AI is analyzing (job status == RETRYING), then check for new attempt
+        console.print(f"\n[bold red]Attempt {n} failed.[/bold red]")
         found_next = False
-        while time.time() < deadline:
-            time.sleep(5)
-            fresh_attempts = _get_attempts()
-            if len(fresh_attempts) > len(seen_attempt_numbers):
-                found_next = True
+        # Give the flow up to 15 s to transition the job to RETRYING
+        deadline_retrying = time.time() + 15
+        while time.time() < deadline_retrying:
+            if current_job_status(job_public_id) == JobStatus.RETRYING:
                 break
+            time.sleep(3)
+
+        if current_job_status(job_public_id) == JobStatus.RETRYING:
+            with console.status("AI is analyzing the failure, waiting for retry...", spinner="dots12"):
+                while current_job_status(job_public_id) == JobStatus.RETRYING:
+                    time.sleep(3)
+            fresh_attempts = _get_attempts()
+            found_next = len(fresh_attempts) > len(seen_attempt_numbers)
         if not found_next:
             # Fetch the latest attempt to surface any AI diagnosis note
             fresh_attempts = _get_attempts()

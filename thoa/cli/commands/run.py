@@ -172,6 +172,7 @@ def run_cmd(
     use_existing_input_dataset: bool = False,
     strict: bool = False,
     max_attempts: int = 3,
+    disable_preflight: bool = False,
 ):
     
     """Run the job with the given configuration using the Bioconda-based execution environment."""
@@ -411,6 +412,7 @@ def run_cmd(
             "input_mount_root": input_root,
             "strict": strict,
             "max_attempts": max_attempts,
+            "disable_preflight": disable_preflight,
         })
 
         # Always set script/cwd/output metadata so backend can build run_command

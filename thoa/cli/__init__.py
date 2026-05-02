@@ -89,6 +89,9 @@ def run_cmd(
     max_attempts: int = typer.Option(
         3, "--max-attempts", help="Maximum number of AI retry attempts (default 3)."
     ),
+    disable_preflight: bool = typer.Option(
+        False, "--disable-preflight", help="Skip preflight resource validation checks."
+    ),
 ):
 
     has_input_data = bool(inputs) or bool(input_dataset)
@@ -130,6 +133,7 @@ def run_cmd(
         use_existing_input_dataset=bool(input_dataset),
         strict=strict,
         max_attempts=max_attempts,
+        disable_preflight=disable_preflight,
     )
 
     

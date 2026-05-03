@@ -131,6 +131,11 @@ class ApiClient:
                 if msg.get("event") == "connected":
                     continue
 
+                if msg.get("event") == "cancelled":
+                    console.print("[bold red]Job was cancelled.[/bold red]")
+                    await ws.close()
+                    break
+
                 if msg.get("event") == "error":
                     console.print(f"[red]error:[/red] {msg.get('message')}")
                     break

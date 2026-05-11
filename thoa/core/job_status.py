@@ -1,4 +1,9 @@
-from enum import StrEnum
+try:
+    from enum import StrEnum
+except ImportError:
+    from enum import Enum
+    class StrEnum(str, Enum):  # Python 3.10 backport
+        pass
 
 
 class JobStatus(StrEnum):
@@ -18,6 +23,7 @@ class JobStatus(StrEnum):
     FAILED_STARTUP = "failed_startup"
     CLEANUP = "cleanup"
     CANCELLED = "cancelled"
+    RETRYING = "retrying"
     ARCHIVED = "archived"
 
 

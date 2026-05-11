@@ -63,6 +63,49 @@ def _print_env_build_failure(job_id: str) -> None:
         pass
 
 
+def _handle_validation_failure(job_public_id: str) -> bool:
+    """
+    Called immediately after detecting FAILED_VALIDATION.
+    Waits for the job to enter RETRYING (AI is working), then waits for it to resolve.
+    Returns True if the AI fixed it and the caller should continue.
+    Returns False if validation permanently failed.
+    """
+    _print_env_build_failure(job_public_id)
+
+    # Wait up to 20 s for the flow to set the status to RETRYING (hook fires quickly)
+    with console.status("Waiting for AI to analyze the environment failure...", spinner="dots12"):
+        deadline = time.time() + 20
+        while time.time() < deadline:
+            time.sleep(3)
+            if current_job_status(job_public_id) != JobStatus.FAILED_VALIDATION:
+                break
+        else:
+            return False  # AI never picked it up
+
+        # Now wait while the AI is actively working
+        while current_job_status(job_public_id) == JobStatus.RETRYING:
+            time.sleep(3)
+
+    if current_job_status(job_public_id) == JobStatus.FAILED_VALIDATION:
+        _print_env_build_failure(job_public_id)
+        return False  # AI couldn't fix it
+
+    console.print("[yellow]AI is retrying with a corrected environment...[/yellow]")
+
+    with console.status("Re-validating corrected environment...", spinner="dots12"):
+        while current_job_status(job_public_id) in {
+            JobStatus.VALIDATING, JobStatus.QUEUED, JobStatus.PENDING, JobStatus.CREATED,
+            JobStatus.STAGING, JobStatus.PROVISIONING,
+        }:
+            time.sleep(4)
+
+    if current_job_status(job_public_id) == JobStatus.FAILED_VALIDATION:
+        _print_env_build_failure(job_public_id)
+        return False  # second failure — give up
+
+    return True  # validation passed, caller continues normal flow
+
+
 def _print_dry_run_summary(
     n_files: int,
     total_size_bytes: int,
@@ -127,6 +170,9 @@ def run_cmd(
     verbose: bool = False,
     has_input_data: bool = True,
     use_existing_input_dataset: bool = False,
+    strict: bool = False,
+    max_attempts: int = 3,
+    disable_preflight: bool = False,
 ):
     
     """Run the job with the given configuration using the Bioconda-based execution environment."""
@@ -364,6 +410,9 @@ def run_cmd(
             "import_transfer_public_id": import_transfer_public_id,
             "export_transfer_public_id": export_transfer_public_id,
             "input_mount_root": input_root,
+            "strict": strict,
+            "max_attempts": max_attempts,
+            "disable_preflight": disable_preflight,
         })
 
         # Always set script/cwd/output metadata so backend can build run_command
@@ -572,8 +621,8 @@ def run_cmd(
                 time.sleep(4)
 
         if current_job_status(updated_job_response['public_id']) == JobStatus.FAILED_VALIDATION:
-            _print_env_build_failure(updated_job_response['public_id'])
-            raise typer.Exit(code=1)
+            if not _handle_validation_failure(updated_job_response['public_id']):
+                raise typer.Exit(code=1)
 
         # STEP 8: Poll the server for disk creation and copy status
         with console.status(f"Staging your files", spinner="dots12"):
@@ -590,8 +639,8 @@ def run_cmd(
                 time.sleep(4)
 
         if current_job_status(updated_job_response['public_id']) == JobStatus.FAILED_VALIDATION:
-            _print_env_build_failure(updated_job_response['public_id'])
-            raise typer.Exit(code=1)
+            if not _handle_validation_failure(updated_job_response['public_id']):
+                raise typer.Exit(code=1)
 
         with console.status(f"Staging your data", spinner="dots12"):
             while current_job_status(updated_job_response['public_id']) == JobStatus.STAGING:
@@ -607,8 +656,8 @@ def run_cmd(
                 time.sleep(4)
 
         if current_job_status(updated_job_response['public_id']) == JobStatus.FAILED_VALIDATION:
-            _print_env_build_failure(updated_job_response['public_id'])
-            raise typer.Exit(code=1)
+            if not _handle_validation_failure(updated_job_response['public_id']):
+                raise typer.Exit(code=1)
 
     if run_async:
         console.print(Panel(
@@ -628,8 +677,8 @@ def run_cmd(
             time.sleep(4)
 
     if current_job_status(updated_job_response['public_id']) == JobStatus.FAILED_VALIDATION:
-        _print_env_build_failure(updated_job_response['public_id'])
-        raise typer.Exit(code=1)
+        if not _handle_validation_failure(updated_job_response['public_id']):
+            raise typer.Exit(code=1)
 
     # STEP 11: Wait until the VM is ready to stream logs, then connect
     with console.status(f"Connecting to your job VM", spinner="dots12"):
@@ -640,10 +689,106 @@ def run_cmd(
             time.sleep(4)
 
     if current_job_status(updated_job_response['public_id']) == JobStatus.FAILED_VALIDATION:
-        _print_env_build_failure(updated_job_response['public_id'])
-        raise typer.Exit(code=1)
+        if not _handle_validation_failure(updated_job_response['public_id']):
+            raise typer.Exit(code=1)
 
-    api_client.stream_logs_blocking(job_response['public_id'], from_id="0-0")
+    # STEP 11b: Stream logs for each attempt, following AI retries
+    job_public_id = job_response['public_id']
+    seen_attempt_numbers: set[int] = set()
+
+    def _get_attempts() -> list[dict]:
+        result = api_client.get(f"/jobs/{job_public_id}/attempts")
+        return result if isinstance(result, list) else []
+
+    def _stream_attempt(attempt: dict) -> bool:
+        """Stream logs for one attempt. Returns True on success."""
+        n = attempt['attempt_number']
+        console.print(f"\n[bold]Attempt {n}[/bold]")
+        # Pass job_public_id — the gateway resolves it to the latest attempt's Redis stream
+        succeeded = api_client.stream_logs_blocking(job_public_id, from_id="0-0")
+        return succeeded
+
+    def _wait_for_attempt_running(attempt_public_id: str, timeout: int = 300) -> bool:
+        """Poll until attempt is running (or terminal). Returns True if running/completed."""
+        deadline = time.time() + timeout
+        running_or_terminal = {
+            JobStatus.RUNNING, JobStatus.COMPLETED, JobStatus.FAILED_EXECUTION,
+            JobStatus.FAILED_STARTUP, JobStatus.CANCELLED, JobStatus.FAILED_VALIDATION,
+        }
+        while time.time() < deadline:
+            attempt_data = api_client.get(f"/attempts/{attempt_public_id}")
+            if attempt_data and attempt_data.get("status") in running_or_terminal:
+                return True
+            time.sleep(4)
+        return False
+
+    # Stream all attempts (starting from what's already running)
+    final_succeeded = False
+    while True:
+        attempts = _get_attempts()
+        # Find the next unseen attempt
+        next_attempt = next(
+            (a for a in attempts if a['attempt_number'] not in seen_attempt_numbers),
+            None
+        )
+        if next_attempt is None:
+            # No new attempt yet — wait briefly and check again (AI may be creating one)
+            time.sleep(4)
+            attempts = _get_attempts()
+            next_attempt = next(
+                (a for a in attempts if a['attempt_number'] not in seen_attempt_numbers),
+                None
+            )
+            if next_attempt is None:
+                break
+
+        n = next_attempt['attempt_number']
+        seen_attempt_numbers.add(n)
+
+        if n > 1:
+            # Show what the AI changed
+            ai_note = next_attempt.get('ai_note') or ''
+            if ai_note:
+                console.print(f"\n[yellow]AI retry — Attempt {n}:[/yellow] {ai_note}")
+            else:
+                console.print(f"\n[yellow]AI is retrying with Attempt {n}...[/yellow]")
+            with console.status(f"Waiting for Attempt {n} to start", spinner="dots12"):
+                _wait_for_attempt_running(next_attempt['public_id'])
+
+        succeeded = _stream_attempt(next_attempt)
+        final_succeeded = succeeded
+
+        if succeeded:
+            break
+
+        # Failure — wait while AI is analyzing (job status == RETRYING), then check for new attempt
+        console.print(f"\n[bold red]Attempt {n} failed.[/bold red]")
+        found_next = False
+        # Give the flow up to 15 s to transition the job to RETRYING
+        deadline_retrying = time.time() + 15
+        while time.time() < deadline_retrying:
+            if current_job_status(job_public_id) == JobStatus.RETRYING:
+                break
+            time.sleep(3)
+
+        if current_job_status(job_public_id) == JobStatus.RETRYING:
+            with console.status("AI is analyzing the failure, waiting for retry...", spinner="dots12"):
+                while current_job_status(job_public_id) == JobStatus.RETRYING:
+                    time.sleep(3)
+            fresh_attempts = _get_attempts()
+            found_next = len(fresh_attempts) > len(seen_attempt_numbers)
+        if not found_next:
+            # Fetch the latest attempt to surface any AI diagnosis note
+            fresh_attempts = _get_attempts()
+            last_attempt = fresh_attempts[-1] if fresh_attempts else None
+            ai_note = (last_attempt or {}).get('ai_note') or ''
+            if ai_note:
+                console.print(f"\n[yellow]AI diagnosis:[/yellow] {ai_note}")
+            console.print("[red]No further attempts. Job failed.[/red]")
+            break
+
+    if not final_succeeded:
+        raise typer.Exit(code=1)
 
     # STEP 12: Download output files to the local machine
     with console.status(f"Job Completed! Preparing your output dataset", spinner="dots12"):

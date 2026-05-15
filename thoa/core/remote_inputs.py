@@ -15,7 +15,7 @@ def detect_input_source_kind(value: str | None) -> str:
     if not value:
         return "none"
     value = str(value).strip()
-    if extract_google_drive_folder_id(value):
+    if extract_google_drive_folder_id(value) or extract_google_drive_file_id(value):
         return "google_drive"
     if value.startswith("s3://"):
         return "s3"
@@ -57,6 +57,25 @@ def extract_google_drive_folder_id(value: str) -> str | None:
     query_id = parse_qs(parsed.query).get("id")
     if query_id:
         return query_id[0]
+
+    return None
+
+
+def extract_google_drive_file_id(value: str) -> str | None:
+    """Return the file id from a Drive single-file sharing link.
+
+    Recognizes ``https://drive.google.com/file/d/<FILE_ID>/view`` style URLs.
+    Folder links return None (use ``extract_google_drive_folder_id``).
+    """
+    parsed = urlparse(value)
+    if parsed.netloc not in {"drive.google.com", "www.drive.google.com"}:
+        return None
+
+    parts = [part for part in parsed.path.split("/") if part]
+    if "file" in parts:
+        idx = parts.index("file")
+        if idx + 2 < len(parts) and parts[idx + 1] == "d":
+            return parts[idx + 2]
 
     return None
 
@@ -152,25 +171,29 @@ def authorize_google_drive_transfer(transfer_id: str) -> dict[str, object]:
 
 
 def import_google_drive_input(
-    folder_url: str,
+    source_url: str,
     *,
     retain_credential_for_export: bool = False,
     defer_execution: bool = False,
 ) -> dict[str, object]:
-    folder_id = extract_google_drive_folder_id(folder_url)
-    if not folder_id:
-        console.print("[bold red]Invalid Google Drive folder URL.[/bold red]")
+    folder_id = extract_google_drive_folder_id(source_url)
+    file_id = None if folder_id else extract_google_drive_file_id(source_url)
+    if not folder_id and not file_id:
+        console.print("[bold red]Invalid Google Drive URL.[/bold red]")
         raise typer.Exit(code=1)
+
+    remote_ref: dict[str, object] = {"provider": "google_drive"}
+    if folder_id:
+        remote_ref["folder_id"] = folder_id
+    else:
+        remote_ref["file_id"] = file_id
 
     transfer = api_client.post(
         "/data-transfers",
         json={
             "provider": "google_drive",
             "direction": "import",
-            "remote_ref": {
-                "provider": "google_drive",
-                "folder_id": folder_id,
-            },
+            "remote_ref": remote_ref,
             "retain_credential_for_export": retain_credential_for_export,
         },
     )

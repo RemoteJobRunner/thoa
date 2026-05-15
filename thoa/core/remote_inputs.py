@@ -1,7 +1,10 @@
+import os
+import queue
+import sys
+import threading
 import time
 import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from threading import Event
 from urllib.parse import parse_qs, urlparse
 
 import typer
@@ -87,8 +90,27 @@ def google_drive_redirect_uri() -> str:
     )
 
 
-def _wait_for_google_callback(expected_state: str, timeout_seconds: int = 300) -> str:
-    event = Event()
+def _parse_pasted_callback(pasted: str) -> tuple[str | None, str | None, str | None]:
+    """Extract (code, state, error) from a pasted callback URL or query string."""
+    pasted = pasted.strip().strip('"').strip("'")
+    if not pasted:
+        return None, None, None
+    query = urlparse(pasted).query if "://" in pasted else pasted.lstrip("?")
+    params = parse_qs(query)
+    return (
+        (params.get("code") or [None])[0],
+        (params.get("state") or [None])[0],
+        (params.get("error") or [None])[0],
+    )
+
+
+def _await_google_drive_code(expected_state: str, timeout_seconds: int = 300) -> str:
+    """Wait for the auth code via two concurrent paths; first one wins.
+
+    1. Loopback HTTP listener (laptop case — browser hits 127.0.0.1).
+    2. Pasted redirect URL on stdin (SSH / headless case — browser can't reach loopback).
+    On non-POSIX or non-tty stdin, only the listener is active.
+    """
     payload: dict[str, str | None] = {}
 
     class CallbackHandler(BaseHTTPRequestHandler):
@@ -98,17 +120,14 @@ def _wait_for_google_callback(expected_state: str, timeout_seconds: int = 300) -
                 self.send_response(404)
                 self.end_headers()
                 return
-
             query = parse_qs(parsed.query)
             payload["code"] = query.get("code", [None])[0]
             payload["state"] = query.get("state", [None])[0]
             payload["error"] = query.get("error", [None])[0]
-
             self.send_response(200)
             self.send_header("Content-Type", "text/plain; charset=utf-8")
             self.end_headers()
             self.wfile.write(b"Google Drive authorization complete. You can close this tab.")
-            event.set()
 
         def log_message(self, format, *args):
             return
@@ -117,24 +136,73 @@ def _wait_for_google_callback(expected_state: str, timeout_seconds: int = 300) -
         (settings.THOA_GDRIVE_CALLBACK_HOST, settings.THOA_GDRIVE_CALLBACK_PORT),
         CallbackHandler,
     )
-    server.timeout = 1
-    started = time.time()
+    server.timeout = 0.5
+
+    can_read_stdin = os.name == "posix"
+    stdin_queue: queue.Queue = queue.Queue()
+
+    def _stdin_reader():
+        try:
+            for line in sys.stdin:
+                stdin_queue.put(line)
+        except Exception:
+            pass
+
+    if can_read_stdin:
+        console.print(
+            "[cyan]Waiting for browser callback.[/cyan] "
+            "[dim]If your browser shows 'site can't be reached'"
+            ", paste the URL it tried to load and press Enter:[/dim]"
+        )
+        sys.stdout.write("> ")
+        sys.stdout.flush()
+        threading.Thread(target=_stdin_reader, daemon=True).start()
+
+    deadline = time.time() + timeout_seconds
     try:
-        while not event.is_set() and (time.time() - started) < timeout_seconds:
+        while time.time() < deadline:
             server.handle_request()
+
+            if payload.get("error"):
+                console.print(
+                    f"[bold red]Google authorization failed:[/bold red] {payload['error']}"
+                )
+                raise typer.Exit(code=1)
+            if payload.get("code"):
+                if payload.get("state") != expected_state:
+                    console.print("[bold red]Google authorization state mismatch.[/bold red]")
+                    raise typer.Exit(code=1)
+                return str(payload["code"])
+
+            try:
+                line = stdin_queue.get_nowait()
+            except queue.Empty:
+                line = None
+            if line is not None:
+                code, state, error = _parse_pasted_callback(line)
+                if error:
+                    console.print(
+                        f"[bold red]Google authorization failed:[/bold red] {error}"
+                    )
+                    raise typer.Exit(code=1)
+                if code and state:
+                    if state != expected_state:
+                        console.print("[bold red]Google authorization state mismatch.[/bold red]")
+                        raise typer.Exit(code=1)
+                    return code
+                if line.strip():
+                    console.print(
+                        "[yellow]Could not find `code` and `state` in that input. "
+                        "Paste the full URL the browser tried to load (starts with "
+                        "http://127.0.0.1:...).[/yellow]"
+                    )
+                sys.stdout.write("> ")
+                sys.stdout.flush()
     finally:
         server.server_close()
 
-    if payload.get("error"):
-        console.print(f"[bold red]Google authorization failed:[/bold red] {payload['error']}")
-        raise typer.Exit(code=1)
-    if not payload.get("code"):
-        console.print("[bold red]Timed out waiting for Google Drive authorization callback.[/bold red]")
-        raise typer.Exit(code=1)
-    if payload.get("state") != expected_state:
-        console.print("[bold red]Google authorization state mismatch.[/bold red]")
-        raise typer.Exit(code=1)
-    return str(payload["code"])
+    console.print("[bold red]Timed out waiting for Google Drive authorization.[/bold red]")
+    raise typer.Exit(code=1)
 
 
 def authorize_google_drive_transfer(transfer_id: str) -> dict[str, object]:
@@ -150,12 +218,25 @@ def authorize_google_drive_transfer(transfer_id: str) -> dict[str, object]:
     auth_url = auth_start["auth_url"]
     state = auth_start["state"]
 
-    console.print("[bold cyan]Starting Google Drive authorization...[/bold cyan]")
-    console.print(f"[dim]{auth_url}[/dim]")
-    if settings.THOA_GDRIVE_OPEN_BROWSER:
-        webbrowser.open(auth_url)
+    console.print()
+    console.print("[bold cyan]Google Drive authorization[/bold cyan]")
+    console.print("Open this URL in a browser and approve access:")
+    console.print()
+    console.print(f"  [link={auth_url}]{auth_url}[/link]")
+    console.print()
 
-    code = _wait_for_google_callback(expected_state=state)
+    opened = False
+    if settings.THOA_GDRIVE_OPEN_BROWSER:
+        try:
+            opened = webbrowser.open(auth_url)
+        except Exception:
+            opened = False
+    if opened:
+        console.print("[dim](We tried to open it for you — if nothing appeared, copy the URL above.)[/dim]")
+    else:
+        console.print("[yellow]Could not open a browser automatically — copy the URL above into one.[/yellow]")
+
+    code = _await_google_drive_code(expected_state=state)
 
     auth_complete = api_client.post(
         f"/data-transfers/{transfer_id}/google-drive/auth/complete",

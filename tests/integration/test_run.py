@@ -28,16 +28,21 @@ def _extract_job_id(output: str) -> str | None:
     return m.group(1) if m else None
 
 
-def _run_job(cli_args: list[str]) -> tuple[str, str]:
-    """Run a job via CLI, return (job_id, output). Asserts exit_code == 0.
+def _run_job(cli_args: list[str], allow_failure: bool = False) -> tuple[str, str]:
+    """Run a job via CLI, return (job_id, output).
 
     Forces --max-attempts=1 and --disable-preflight on every integration job so
     AI retry/preflight paths never engage — they make assertions non-deterministic
     and previously hung nightly runs in 'retrying' indefinitely.
+
+    Asserts exit_code == 0 by default. Pass allow_failure=True for tests that
+    intentionally submit a failing job (CLI exits non-zero when the job ends
+    in a failed terminal state, which is the correct behavior).
     """
     cli_args = [*cli_args, "--max-attempts", "1", "--disable-preflight"]
     result = runner.invoke(app, cli_args)
-    assert result.exit_code == 0, f"CLI failed: {result.output}"
+    if not allow_failure:
+        assert result.exit_code == 0, f"CLI failed: {result.output}"
     job_id = _extract_job_id(result.output)
     assert job_id, f"No job ID in output: {result.output}"
     return job_id, result.output
@@ -218,11 +223,15 @@ def test_cancel_running_job_no_error_message():
 
 @pytest.mark.slow
 def test_job_script_failure():
-    """Script exits with non-zero code -> job should end as failed_execution."""
+    """Script exits with non-zero code -> job should end as failed_execution.
+
+    CLI exits non-zero when the job ends in a failed terminal state, so we
+    pass allow_failure=True; the assertion below verifies the status itself.
+    """
     job_id, _ = _run_job([
         "run", "--tools", "bash", "--cmd", "echo 'about to fail' && exit 1",
         "--n-cores", "2", "--ram", "4", "--storage", "50",
-    ])
+    ], allow_failure=True)
     status = get_job_status(job_id)
     assert status in {"failed_execution", "failed"}, f"Job {job_id} status: {status}"
 

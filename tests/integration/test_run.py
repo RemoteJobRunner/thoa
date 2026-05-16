@@ -29,7 +29,13 @@ def _extract_job_id(output: str) -> str | None:
 
 
 def _run_job(cli_args: list[str]) -> tuple[str, str]:
-    """Run a job via CLI, return (job_id, output). Asserts exit_code == 0."""
+    """Run a job via CLI, return (job_id, output). Asserts exit_code == 0.
+
+    Forces --max-attempts=1 and --disable-preflight on every integration job so
+    AI retry/preflight paths never engage — they make assertions non-deterministic
+    and previously hung nightly runs in 'retrying' indefinitely.
+    """
+    cli_args = [*cli_args, "--max-attempts", "1", "--disable-preflight"]
     result = runner.invoke(app, cli_args)
     assert result.exit_code == 0, f"CLI failed: {result.output}"
     job_id = _extract_job_id(result.output)
@@ -140,6 +146,8 @@ def test_job_with_invalid_tool():
         "requested_ram": 4, "requested_cpu": 2,
         "requested_disk_space": 50, "has_input_data": False,
         "client_home": "/tmp",
+        "max_attempts": 1,
+        "disable_preflight": True,
     }).json()
 
     api_put(f"/jobs/{job['public_id']}", json={
@@ -176,6 +184,8 @@ def test_cancel_running_job_no_error_message():
         "requested_ram": 4, "requested_cpu": 2,
         "requested_disk_space": 50, "has_input_data": False,
         "client_home": "/tmp",
+        "max_attempts": 1,
+        "disable_preflight": True,
     }).json()
 
     api_put(f"/jobs/{job['public_id']}", json={

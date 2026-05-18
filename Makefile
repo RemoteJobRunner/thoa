@@ -1,3 +1,5 @@
+.PHONY: test-unit test-integration test-slow test-nightly tests test-int test-night
+
 PYTEST = thoa/venv/bin/python -m pytest
 
 test-unit:

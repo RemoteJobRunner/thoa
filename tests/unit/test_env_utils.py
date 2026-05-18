@@ -22,7 +22,7 @@ class TestResolveEnvironmentSpec:
 
     def test_unsupported_format_raises_value_error(self):
         with pytest.raises(ValueError, match="Unsupported"):
-            resolve_environment_spec("config.txt")
+            resolve_environment_spec("config.json")
 
     def test_missing_file_raises_file_not_found(self):
         with pytest.raises(FileNotFoundError):

@@ -292,10 +292,27 @@ def import_google_drive_input(
 
     manifest = api_client.get(f"/data-transfers/{transfer_id}/manifest")
     if manifest:
+        total_items = manifest["total_items"]
+        skipped_count = manifest.get("skipped_items", 0)
+        importable = total_items - skipped_count
         console.print(
             f"[green]Google Drive manifest ready:[/green] "
-            f"{manifest['total_items']} items, {manifest['total_bytes']} bytes"
+            f"{importable} importable item(s), {manifest['total_bytes']} bytes"
         )
+        if skipped_count:
+            console.print(
+                f"[yellow]Skipping {skipped_count} unsupported item(s):[/yellow]"
+            )
+            samples = manifest.get("skipped_samples", [])
+            for sample in samples:
+                console.print(
+                    f"  [dim]- {sample['path']} "
+                    f"({sample.get('mime_type') or 'unknown type'})[/dim]"
+                )
+            if len(samples) < skipped_count:
+                console.print(
+                    f"  [dim]... and {skipped_count - len(samples)} more[/dim]"
+                )
 
     if defer_execution:
         return {

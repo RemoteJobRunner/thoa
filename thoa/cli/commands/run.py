@@ -43,7 +43,9 @@ from thoa.core.remote_inputs import (
     detect_remote_ref_kind,
     extract_google_drive_folder_id,
     import_google_drive_input,
+    print_manifest_summary,
     project_input_context,
+    track_transfer_progress,
 )
 from thoa.core.job_status import JobStatus, UPLOAD_STATUSES
 
@@ -359,6 +361,9 @@ def run_cmd(
         dry_run=dry_run,
         verbose=verbose,
     )
+
+    if import_transfer_public_id:
+        print_manifest_summary(imported_input.get("manifest"))
     
     # STEP 0: Validate that the user has sufficient resources to run the job
     valid = validate_user_command(n_cores=n_cores, ram=ram, storage=storage)
@@ -515,11 +520,29 @@ def run_cmd(
 
     # STEP 4: Hash the file objects and create them on the server, as well as the input dataset object
     if import_transfer_public_id:
-        # Google Drive deferred import: wait until the import flow has
-        # populated job.input_context (post-resolve + post-transfer), then
-        # print the same staged-paths block the dataset branch prints. Kept
-        # outside the "Hashing File Objects" status block so this branch's
-        # own spinner is the one the user actually sees.
+        # Google Drive deferred import: wait for the import transfer to
+        # finish (showing per-file progress), then briefly poll until the
+        # backend has populated job.input_context, then print the same
+        # staged-paths block the dataset branch prints.
+        import_final = track_transfer_progress(
+            import_transfer_public_id,
+            label="Importing Google Drive data",
+        )
+        if import_final.get("status") == "failed":
+            transfer_view = api_client.get(
+                f"/data-transfers/{import_transfer_public_id}"
+            )
+            console.print(
+                "[bold red]Google Drive import failed:[/bold red] "
+                f"{(transfer_view or {}).get('error_message') or 'unknown error'}"
+            )
+            raise typer.Exit(code=1)
+        console.print(
+            f"[green]Imported {import_final.get('completed_items', 0)} file(s), "
+            f"{import_final.get('completed_bytes', 0)} bytes "
+            f"(skipped {import_final.get('skipped_items', 0)})[/green]"
+        )
+
         poll_deadline = time.time() + 30 * 60
         job_view = None
         with console.status("Resolving Google Drive inputs", spinner="dots12"):
@@ -531,21 +554,12 @@ def run_cmd(
                 if results and results[0].get("input_context"):
                     job_view = results[0]
                     break
-                transfer_view = api_client.get(
-                    f"/data-transfers/{import_transfer_public_id}"
-                )
-                if transfer_view and transfer_view.get("status") == "failed":
-                    console.print(
-                        "[bold red]Google Drive import failed:[/bold red] "
-                        f"{transfer_view.get('error_message') or 'unknown error'}"
-                    )
-                    raise typer.Exit(code=1)
                 if time.time() > poll_deadline:
                     console.print(
                         "[bold red]Timed out waiting for Google Drive import.[/bold red]"
                     )
                     raise typer.Exit(code=1)
-                time.sleep(4)
+                time.sleep(2)
 
         input_ctx = job_view.get("input_context") or {}
         adjusted = job_view.get("adjusted_input_context") or {}
@@ -857,10 +871,30 @@ def run_cmd(
     # STEP 12: Download output files to the local machine
     with console.status(f"Job Completed! Preparing your output dataset", spinner="dots12"):
         while current_job_status(updated_job_response['public_id']) == JobStatus.CLEANUP:
-            time.sleep(4) 
+            time.sleep(4)
             if current_job_status(updated_job_response['public_id']) == JobStatus.COMPLETED:
                 break
- 
+
+    if export_transfer_public_id:
+        # Job is done; the backend has kicked off the export-to-Drive transfer.
+        # Show per-file progress until the export terminates.
+        export_final = track_transfer_progress(
+            export_transfer_public_id,
+            label="Exporting to Google Drive",
+        )
+        if export_final.get("status") == "failed":
+            export_blob = api_client.get(f"/data-transfers/{export_transfer_public_id}")
+            error = (export_blob or {}).get("error_message") or "unknown error"
+            console.print(
+                f"[bold red]Google Drive export failed:[/bold red] {error}"
+            )
+        else:
+            console.print(
+                f"[green]Exported {export_final.get('completed_items', 0)} file(s), "
+                f"{export_final.get('completed_bytes', 0)} bytes "
+                f"to Google Drive[/green]"
+            )
+
     if current_job_status(updated_job_response['public_id']) == JobStatus.CANCELLED:
         console.print("[yellow]Job was cancelled. No output files will be downloaded.[/yellow]")
         raise typer.Exit(code=1)

@@ -8,6 +8,13 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import parse_qs, urlparse
 
 import typer
+from rich.progress import (
+    BarColumn,
+    MofNCompleteColumn,
+    Progress,
+    TextColumn,
+    TimeRemainingColumn,
+)
 
 from thoa.config import settings
 from thoa.core.api_utils import api_client
@@ -237,6 +244,10 @@ def authorize_google_drive_transfer(transfer_id: str) -> dict[str, object]:
         console.print("[yellow]Could not open a browser automatically — copy the URL above into one.[/yellow]")
 
     code = _await_google_drive_code(expected_state=state)
+    # `_await_google_drive_code` wrote a `> ` paste prompt without a trailing
+    # newline. Whether the auth code came via the HTTP callback or a paste,
+    # the cursor is mid-line; terminate it before any downstream output.
+    console.print()
 
     auth_complete = api_client.post(
         f"/data-transfers/{transfer_id}/google-drive/auth/complete",
@@ -249,6 +260,96 @@ def authorize_google_drive_transfer(transfer_id: str) -> dict[str, object]:
         raise typer.Exit(code=1)
 
     return auth_complete
+
+
+def track_transfer_progress(
+    transfer_id: str,
+    *,
+    label: str,
+    poll_interval_seconds: float = 2.0,
+) -> dict:
+    """Poll a transfer's manifest until it terminates, showing a progress bar.
+
+    Works for both import and export transfers — the manifest summary returns
+    the same shape for both directions. Logs every completed file exactly
+    once by tracking a seen-set against the backend's ``completed_paths``
+    list, so per-file lines aren't dropped when items finish in bursts.
+    Returns the final manifest snapshot so the caller can render a summary.
+    """
+    seen: set[str] = set()
+    task = None
+    with Progress(
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        MofNCompleteColumn(),
+        TextColumn("•"),
+        TimeRemainingColumn(),
+        console=console,
+    ) as progress:
+        while True:
+            manifest = api_client.get(
+                f"/data-transfers/{transfer_id}/manifest",
+                silent_status_codes={404},
+            )
+            if not manifest:
+                time.sleep(poll_interval_seconds)
+                continue
+
+            total = manifest.get("total_items", 0)
+            skipped = manifest.get("skipped_items", 0)
+            importable = max(total - skipped, 0)
+            status = manifest.get("status")
+
+            if task is None:
+                task = progress.add_task(label, total=importable or 1)
+
+            for path in manifest.get("completed_paths", []):
+                if path in seen:
+                    continue
+                seen.add(path)
+                progress.console.log(
+                    f"[{len(seen)}/{importable or len(seen)}] {path}"
+                )
+            progress.update(task, completed=min(len(seen), importable or len(seen)))
+
+            if status in ("completed", "failed"):
+                if status == "completed" and importable:
+                    progress.update(task, completed=importable)
+                return manifest
+
+            time.sleep(poll_interval_seconds)
+
+
+def print_manifest_summary(manifest: dict) -> None:
+    """Render the 'manifest ready' + skipped-items block.
+
+    Kept separate from ``import_google_drive_input`` so callers can position
+    it freely (e.g. after the job-configuration table) instead of having
+    it always print inline with manifest creation.
+    """
+    if not manifest:
+        return
+    total_items = manifest.get("total_items", 0)
+    skipped_count = manifest.get("skipped_items", 0)
+    importable = total_items - skipped_count
+    console.print(
+        f"[green]Google Drive manifest ready:[/green] "
+        f"{importable} importable item(s), {manifest.get('total_bytes', 0)} bytes"
+    )
+    if skipped_count:
+        console.print(
+            f"[yellow]Skipping {skipped_count} unsupported item(s):[/yellow]"
+        )
+        samples = manifest.get("skipped_samples", [])
+        for sample in samples:
+            console.print(
+                f"  [dim]- {sample['path']} "
+                f"({sample.get('mime_type') or 'unknown type'})[/dim]"
+            )
+        if len(samples) < skipped_count:
+            console.print(
+                f"  [dim]... and {skipped_count - len(samples)} more[/dim]"
+            )
 
 
 def import_google_drive_input(
@@ -291,28 +392,6 @@ def import_google_drive_input(
         raise typer.Exit(code=1)
 
     manifest = api_client.get(f"/data-transfers/{transfer_id}/manifest")
-    if manifest:
-        total_items = manifest["total_items"]
-        skipped_count = manifest.get("skipped_items", 0)
-        importable = total_items - skipped_count
-        console.print(
-            f"[green]Google Drive manifest ready:[/green] "
-            f"{importable} importable item(s), {manifest['total_bytes']} bytes"
-        )
-        if skipped_count:
-            console.print(
-                f"[yellow]Skipping {skipped_count} unsupported item(s):[/yellow]"
-            )
-            samples = manifest.get("skipped_samples", [])
-            for sample in samples:
-                console.print(
-                    f"  [dim]- {sample['path']} "
-                    f"({sample.get('mime_type') or 'unknown type'})[/dim]"
-                )
-            if len(samples) < skipped_count:
-                console.print(
-                    f"  [dim]... and {skipped_count - len(samples)} more[/dim]"
-                )
 
     if defer_execution:
         return {
@@ -325,23 +404,25 @@ def import_google_drive_input(
     if not start_status:
         raise typer.Exit(code=1)
 
-    with console.status("Importing Google Drive data", spinner="dots12"):
-        while True:
-            status = api_client.get(f"/data-transfers/{transfer_id}")
-            if not status:
-                raise typer.Exit(code=1)
-            if status["status"] == "completed":
-                resolved = api_client.get(f"/data-transfers/{transfer_id}/resolved-context")
-                if not resolved:
-                    raise typer.Exit(code=1)
-                dataset_public_id = resolved.get("dataset_public_id")
-                if not dataset_public_id:
-                    console.print("[bold red]Transfer completed without dataset id.[/bold red]")
-                    raise typer.Exit(code=1)
-                return resolved
-            if status["status"] == "failed":
-                console.print(
-                    f"[bold red]Google Drive import failed:[/bold red] {status.get('error_message') or 'unknown error'}"
-                )
-                raise typer.Exit(code=1)
-            time.sleep(4)
+    final = track_transfer_progress(transfer_id, label="Importing Google Drive data")
+
+    if final.get("status") == "failed":
+        status_blob = api_client.get(f"/data-transfers/{transfer_id}")
+        error = (status_blob or {}).get("error_message") or "unknown error"
+        console.print(f"[bold red]Google Drive import failed:[/bold red] {error}")
+        raise typer.Exit(code=1)
+
+    console.print(
+        f"[green]Imported {final.get('completed_items', 0)} file(s), "
+        f"{final.get('completed_bytes', 0)} bytes "
+        f"(skipped {final.get('skipped_items', 0)})[/green]"
+    )
+
+    resolved = api_client.get(f"/data-transfers/{transfer_id}/resolved-context")
+    if not resolved:
+        raise typer.Exit(code=1)
+    dataset_public_id = resolved.get("dataset_public_id")
+    if not dataset_public_id:
+        console.print("[bold red]Transfer completed without dataset id.[/bold red]")
+        raise typer.Exit(code=1)
+    return resolved

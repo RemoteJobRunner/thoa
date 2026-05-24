@@ -43,11 +43,30 @@ from thoa.core.remote_inputs import (
     detect_remote_ref_kind,
     extract_google_drive_folder_id,
     import_google_drive_input,
+    print_manifest_summary,
     project_input_context,
+    track_transfer_progress,
 )
 from thoa.core.job_status import JobStatus, UPLOAD_STATUSES
 
 max_threads = min(32, os.cpu_count() * 2)
+
+
+def _print_staged_paths(rel_paths: list) -> None:
+    """Print up to five entries from a job's adjusted input context.
+
+    Mirrors the truncation rule used for input-dataset display so both
+    branches look the same: full list when <=5 items, else first four +
+    ellipsis + last.
+    """
+    if len(rel_paths) <= 5:
+        for rel_path in rel_paths:
+            console.print(f"  ./{rel_path}")
+    else:
+        for rel_path in rel_paths[:4]:
+            console.print(f"  ./{rel_path}")
+        console.print("  ...")
+        console.print(f"  ./{rel_paths[-1]}")
 
 
 def _print_env_build_failure(job_id: str) -> None:
@@ -342,6 +361,9 @@ def run_cmd(
         dry_run=dry_run,
         verbose=verbose,
     )
+
+    if import_transfer_public_id:
+        print_manifest_summary(imported_input.get("manifest"))
     
     # STEP 0: Validate that the user has sufficient resources to run the job
     valid = validate_user_command(n_cores=n_cores, ram=ram, storage=storage)
@@ -497,61 +519,117 @@ def run_cmd(
 
 
     # STEP 4: Hash the file objects and create them on the server, as well as the input dataset object
-    with console.status(f"Hashing File Objects", spinner="dots12"):
-
-        # No inputs provided at all
-        if not input_dataset and not inputs:
-            console.print("[yellow]No input files specified. Skipping input upload.[/yellow]")
-            new_input_dataset = None
-            names_to_public_ids = {}
-
-        elif input_dataset:
-            console.print(f"[green]Using dataset {input_dataset} as job input.[/green]")
-            console.print("[yellow]Using existing input dataset. Files will be staged under:[/yellow]")
-            rel_paths = list(input_dataset_response.get("adjusted_context", {}).keys())
-            if len(rel_paths) <= 5:
-                for rel_path in rel_paths:
-                    console.print(f"  ./{rel_path}")
-            else:
-                for rel_path in rel_paths[:4]:
-                    console.print(f"  ./{rel_path}")
-                console.print(f"  ...")
-                console.print(f"  ./{rel_paths[-1]}")
-            new_input_dataset = None
-            names_to_public_ids = {}
-
-        elif inputs:
-
-            all_files = collect_files(inputs)
-            file_sizes = file_sizes_in_bytes(all_files)
-            all_hashes = hash_all(all_files)
-            file_responses = []
-            local_path_by_public_id = {}
-
-            for path, size in file_sizes.items():
-                response = api_client.post("/files", json={
-                    "filename": str(path),
-                    "md5sum": all_hashes[path],
-                    "size": size,
-                })
-                file_responses.append(response)
-                local_path_by_public_id[response["public_id"]] = str(path)
-
-            names_to_public_ids = {f['filename']: f['public_id'] for f in file_responses}
-
-            new_input_dataset = api_client.post("/datasets", json={
-                "files": [f['public_id'] for f in file_responses],
-            })
-
-        # Only update if we have an input dataset
-        if new_input_dataset:
-            updated_job_response = api_client.put(
-                f"/jobs/{job_response['public_id']}",
-                json={
-                    "input_dataset_public_id": new_input_dataset["public_id"],
-                    "input_context": names_to_public_ids 
-                }
+    if import_transfer_public_id:
+        # Google Drive deferred import: wait for the import transfer to
+        # finish (showing per-file progress), then briefly poll until the
+        # backend has populated job.input_context, then print the same
+        # staged-paths block the dataset branch prints.
+        import_final = track_transfer_progress(
+            import_transfer_public_id,
+            label="Importing Google Drive data",
+        )
+        if import_final.get("status") == "failed":
+            transfer_view = api_client.get(
+                f"/data-transfers/{import_transfer_public_id}"
             )
+            console.print(
+                "[bold red]Google Drive import failed:[/bold red] "
+                f"{(transfer_view or {}).get('error_message') or 'unknown error'}"
+            )
+            raise typer.Exit(code=1)
+        console.print(
+            f"[green]Imported {import_final.get('completed_items', 0)} file(s), "
+            f"{import_final.get('completed_bytes', 0)} bytes "
+            f"(skipped {import_final.get('skipped_items', 0)})[/green]"
+        )
+
+        poll_deadline = time.time() + 30 * 60
+        job_view = None
+        with console.status("Resolving Google Drive inputs", spinner="dots12"):
+            while True:
+                results = api_client.get(
+                    f"/jobs?public_id={job_response['public_id']}"
+                    "&include_adjusted_context=True"
+                )
+                if results and results[0].get("input_context"):
+                    job_view = results[0]
+                    break
+                if time.time() > poll_deadline:
+                    console.print(
+                        "[bold red]Timed out waiting for Google Drive import.[/bold red]"
+                    )
+                    raise typer.Exit(code=1)
+                time.sleep(2)
+
+        input_ctx = job_view.get("input_context") or {}
+        adjusted = job_view.get("adjusted_input_context") or {}
+        all_known = bool(input_ctx) and all(v for v in input_ctx.values())
+        if all_known:
+            console.print(
+                "[green]Reusing previously-imported Google Drive dataset as job input.[/green]"
+            )
+            console.print(
+                "[yellow]Using existing input dataset. Files will be staged under:[/yellow]"
+            )
+        else:
+            n_new = sum(1 for v in input_ctx.values() if not v)
+            console.print(
+                f"[green]Importing {n_new} file(s) from Google Drive as job input.[/green]"
+            )
+            console.print("[yellow]Files will be staged under:[/yellow]")
+        _print_staged_paths(list(adjusted.keys()))
+        new_input_dataset = None
+        names_to_public_ids = {}
+
+    else:
+        with console.status(f"Hashing File Objects", spinner="dots12"):
+
+            # No inputs provided at all
+            if not input_dataset and not inputs:
+                console.print("[yellow]No input files specified. Skipping input upload.[/yellow]")
+                new_input_dataset = None
+                names_to_public_ids = {}
+
+            elif input_dataset:
+                console.print(f"[green]Using dataset {input_dataset} as job input.[/green]")
+                console.print("[yellow]Using existing input dataset. Files will be staged under:[/yellow]")
+                rel_paths = list(input_dataset_response.get("adjusted_context", {}).keys())
+                _print_staged_paths(rel_paths)
+                new_input_dataset = None
+                names_to_public_ids = {}
+
+            elif inputs:
+
+                all_files = collect_files(inputs)
+                file_sizes = file_sizes_in_bytes(all_files)
+                all_hashes = hash_all(all_files)
+                file_responses = []
+                local_path_by_public_id = {}
+
+                for path, size in file_sizes.items():
+                    response = api_client.post("/files", json={
+                        "filename": str(path),
+                        "md5sum": all_hashes[path],
+                        "size": size,
+                    })
+                    file_responses.append(response)
+                    local_path_by_public_id[response["public_id"]] = str(path)
+
+                names_to_public_ids = {f['filename']: f['public_id'] for f in file_responses}
+
+                new_input_dataset = api_client.post("/datasets", json={
+                    "files": [f['public_id'] for f in file_responses],
+                })
+
+            # Only update if we have an input dataset
+            if new_input_dataset:
+                updated_job_response = api_client.put(
+                    f"/jobs/{job_response['public_id']}",
+                    json={
+                        "input_dataset_public_id": new_input_dataset["public_id"],
+                        "input_context": names_to_public_ids
+                    }
+                )
             
     if new_input_dataset:
         # STEP 5: Create signed azure URLs for the file objects
@@ -793,10 +871,30 @@ def run_cmd(
     # STEP 12: Download output files to the local machine
     with console.status(f"Job Completed! Preparing your output dataset", spinner="dots12"):
         while current_job_status(updated_job_response['public_id']) == JobStatus.CLEANUP:
-            time.sleep(4) 
+            time.sleep(4)
             if current_job_status(updated_job_response['public_id']) == JobStatus.COMPLETED:
                 break
- 
+
+    if export_transfer_public_id:
+        # Job is done; the backend has kicked off the export-to-Drive transfer.
+        # Show per-file progress until the export terminates.
+        export_final = track_transfer_progress(
+            export_transfer_public_id,
+            label="Exporting to Google Drive",
+        )
+        if export_final.get("status") == "failed":
+            export_blob = api_client.get(f"/data-transfers/{export_transfer_public_id}")
+            error = (export_blob or {}).get("error_message") or "unknown error"
+            console.print(
+                f"[bold red]Google Drive export failed:[/bold red] {error}"
+            )
+        else:
+            console.print(
+                f"[green]Exported {export_final.get('completed_items', 0)} file(s), "
+                f"{export_final.get('completed_bytes', 0)} bytes "
+                f"to Google Drive[/green]"
+            )
+
     if current_job_status(updated_job_response['public_id']) == JobStatus.CANCELLED:
         console.print("[yellow]Job was cancelled. No output files will be downloaded.[/yellow]")
         raise typer.Exit(code=1)

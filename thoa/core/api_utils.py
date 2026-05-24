@@ -50,8 +50,15 @@ class ApiClient:
             timeout=httpx.Timeout(timeout),
         )
 
-    def _request(self, method: str, path: str, **kwargs):
-        
+    def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        silent_status_codes: set[int] | None = None,
+        **kwargs,
+    ):
+
         if not self.api_key:
             rprint("[bold red]ERROR: No API key provided. Please set the THOA_API_KEY environment variable.[/bold red]\n")
             rprint(f"You can obtain an API key from the THOA web interface at [blue]{settings.THOA_UI_URL}/workbench/api_keys[/blue]")
@@ -60,12 +67,14 @@ class ApiClient:
         api_path = f"/api{path}"
         response = self.client.request(method, api_path, **kwargs)
 
-        if response.status_code == 200: 
+        if response.status_code == 200:
             if settings.THOA_API_DEBUG:
                 rprint(f"[green]DEBUG: Successful {method} request to {api_path}[/green]")
                 rprint(f"[green]Response:[/green] {response.json()}")
             return response.json()
         else:
+            if silent_status_codes and response.status_code in silent_status_codes:
+                return None
             detail = None
             try:
                 payload = response.json()
@@ -78,14 +87,14 @@ class ApiClient:
             ErrorReadouts(response.status_code, detail).readout()
             return
 
-    def get(self, path: str, **kwargs):
-        return self._request("GET", path, **kwargs)
+    def get(self, path: str, *, silent_status_codes: set[int] | None = None, **kwargs):
+        return self._request("GET", path, silent_status_codes=silent_status_codes, **kwargs)
 
-    def post(self, path: str, **kwargs):
-        return self._request("POST", path, **kwargs)
+    def post(self, path: str, *, silent_status_codes: set[int] | None = None, **kwargs):
+        return self._request("POST", path, silent_status_codes=silent_status_codes, **kwargs)
 
-    def put(self, path: str, **kwargs):
-        return self._request("PUT", path, **kwargs)
+    def put(self, path: str, *, silent_status_codes: set[int] | None = None, **kwargs):
+        return self._request("PUT", path, silent_status_codes=silent_status_codes, **kwargs)
 
     def close(self):
         self.client.close()

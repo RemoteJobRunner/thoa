@@ -2,9 +2,18 @@ import httpx
 from typing import Optional
 from thoa.config import settings
 from rich import print as rprint
-import asyncio, json, websockets 
+import asyncio, json, websockets
 from rich.console import Console
 from rich.text import Text
+from importlib.metadata import version as _pkg_version, PackageNotFoundError
+
+
+def _thoa_version() -> str:
+    try:
+        return _pkg_version("thoa")
+    except PackageNotFoundError:
+        return "0.0.0"
+
 
 console = Console()
 
@@ -32,6 +41,13 @@ class ErrorReadouts:
             rprint("[bold red]500 Internal Server Error: The server encountered an unexpected condition that prevented it from fulfilling the request.[/bold red]\n\n"
                "[yellow]HINT: This is likely a server-side issue. Please try again later or contact support.[/yellow]")
 
+        elif self.status_code == 426:
+            rprint(
+                "[bold red]426 Upgrade Required: Your thoa CLI is outdated.[/bold red]\n\n"
+                f"[yellow]SERVER MESSAGE:\n{self.detail}[/yellow]\n\n"
+                "[bold yellow]Run: pip install -U thoa[/bold yellow]"
+            )
+
         else: 
             rprint(f"[bold red]{self.status_code} Error: An unexpected error occurred.[/bold red]\n\n"
                f"[yellow]SERVER MESSAGE:\n{self.detail}[/yellow]")
@@ -46,6 +62,7 @@ class ApiClient:
             headers={
                 "X-API-Key": self.api_key if self.api_key else "",
                 "Accept": "application/json",
+                "X-Client-Version": _thoa_version(),
             },
             timeout=httpx.Timeout(timeout),
         )

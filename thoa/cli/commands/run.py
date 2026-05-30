@@ -502,23 +502,32 @@ def run_cmd(
             )
 
 
-    # STEP 3: Trigger validation of the environment ASYNC 
+    # STEP 3: Trigger validation of the environment ASYNC
     def validate_env_background():
 
         """Background thread to validate the environment."""
 
         env_validation_result = {"env_status": "pending"}
+        # Cap how long this thread keeps polling so a stuck env never holds the
+        # CLI alive past --run-async return. 10 minutes is generous for any env build.
+        deadline = time.time() + 600
 
         while env_validation_result.get("env_status") not in ("validated", "validation_failed"):
+            if time.time() > deadline:
+                return
             try:
-                env_validation_result = api_client.get(
+                response = api_client.get(
                     f"/environments/{environment_details['public_id']}/validate"
                 )
+                if isinstance(response, dict):
+                    env_validation_result = response
                 time.sleep(4)
-            except:
+            except Exception:
                 time.sleep(1)
 
-    validation_thread = Thread(target=validate_env_background)
+    # daemon=True so --run-async return doesn't block on this poller; Python won't
+    # wait for it on interpreter exit.
+    validation_thread = Thread(target=validate_env_background, daemon=True)
     validation_thread.start()
 
 

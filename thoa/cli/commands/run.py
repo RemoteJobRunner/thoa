@@ -317,8 +317,12 @@ def run_cmd(
         all_files = []
         input_dataset = input_dataset.strip()
         input_dataset_response = api_client.get(f"/datasets?public_id={input_dataset}&include_adjusted_context=True&include_jobs_as_input=False&include_jobs_as_output=False")[0]
-        if input_dataset_response.get("deletion_pending"):
-            console.print("[bold red]Error:[/bold red] Dataset is pending deletion and cannot be used as input.")
+        dataset_status = input_dataset_response.get("status")
+        if dataset_status in ("deleting", "deleted"):
+            console.print("[bold red]Error:[/bold red] Dataset is being deleted or has been deleted and cannot be used as input.")
+            raise typer.Exit(code=1)
+        if dataset_status == "creating":
+            console.print("[bold red]Error:[/bold red] Dataset upload is still in progress and cannot be used as input yet.")
             raise typer.Exit(code=1)
 
         dataset_size_bytes = input_dataset_response.get("total_size") or 0

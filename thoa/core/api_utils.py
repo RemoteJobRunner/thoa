@@ -50,8 +50,15 @@ class ApiClient:
             timeout=httpx.Timeout(timeout),
         )
 
-    def _request(self, method: str, path: str, **kwargs):
-        
+    def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        silent_status_codes: set[int] | None = None,
+        **kwargs,
+    ):
+
         if not self.api_key:
             rprint("[bold red]ERROR: No API key provided. Please set the THOA_API_KEY environment variable.[/bold red]\n")
             rprint(f"You can obtain an API key from the THOA web interface at [blue]{settings.THOA_UI_URL}/workbench/api_keys[/blue]")
@@ -60,12 +67,14 @@ class ApiClient:
         api_path = f"/api{path}"
         response = self.client.request(method, api_path, **kwargs)
 
-        if response.status_code == 200: 
+        if response.status_code == 200:
             if settings.THOA_API_DEBUG:
                 rprint(f"[green]DEBUG: Successful {method} request to {api_path}[/green]")
                 rprint(f"[green]Response:[/green] {response.json()}")
             return response.json()
         else:
+            if silent_status_codes and response.status_code in silent_status_codes:
+                return None
             detail = None
             try:
                 payload = response.json()
@@ -78,23 +87,24 @@ class ApiClient:
             ErrorReadouts(response.status_code, detail).readout()
             return
 
-    def get(self, path: str, **kwargs):
-        return self._request("GET", path, **kwargs)
+    def get(self, path: str, *, silent_status_codes: set[int] | None = None, **kwargs):
+        return self._request("GET", path, silent_status_codes=silent_status_codes, **kwargs)
 
-    def post(self, path: str, **kwargs):
-        return self._request("POST", path, **kwargs)
+    def post(self, path: str, *, silent_status_codes: set[int] | None = None, **kwargs):
+        return self._request("POST", path, silent_status_codes=silent_status_codes, **kwargs)
 
-    def put(self, path: str, **kwargs):
-        return self._request("PUT", path, **kwargs)
+    def put(self, path: str, *, silent_status_codes: set[int] | None = None, **kwargs):
+        return self._request("PUT", path, silent_status_codes=silent_status_codes, **kwargs)
 
     def close(self):
         self.client.close()
 
-    async def stream_logs(self, job_id: str, from_id: str = "$"):
-        """
-        Connects to ws://<base>/ws/logs/{job_id}?from_id=<from_id>
-        Sends X-API-Key and the same Accept header as HTTP client.
-        Prints lines as they arrive.
+    async def stream_logs(self, job_id: str, from_id: str = "$") -> bool:
+        """Stream logs for the current attempt of job_id.
+
+        Returns True if the attempt succeeded, False if it failed.
+        Prints lines as they arrive; the caller is responsible for
+        printing the per-attempt success/failure message.
         """
         base = self.base_url
         if base.startswith("https://"):
@@ -110,6 +120,7 @@ class ApiClient:
             "Accept": "application/json",
         }
 
+        succeeded = False
         async with websockets.connect(
             url,
             additional_headers=headers,
@@ -127,18 +138,19 @@ class ApiClient:
                     continue
 
                 if msg.get("event") == "connected":
-                    console.print(f"[green]connected[/green] job={msg.get('job_id')} from_id={msg.get('from_id')}")
                     continue
+
+                if msg.get("event") == "cancelled":
+                    console.print("[bold red]Job was cancelled.[/bold red]")
+                    await ws.close()
+                    break
 
                 if msg.get("event") == "error":
                     console.print(f"[red]error:[/red] {msg.get('message')}")
                     break
 
                 if msg.get("event") == "done":
-                    if msg.get("success") == 1:
-                        console.print("[bold green] Job succeeded [/bold green]")
-                    else:
-                        console.print("[bold red] Job failed [/bold red]")
+                    succeeded = msg.get("success") == 1
                     await ws.close()
                     break
 
@@ -151,9 +163,11 @@ class ApiClient:
                 else:
                     console.print(f"[blue][remote stdout][/blue] {data}", end="")
 
-    def stream_logs_blocking(self, job_id: str, from_id: str = "0-0"):
-        """Convenience wrapper for sync CLIs."""
-        asyncio.run(self.stream_logs(job_id, from_id))
+        return succeeded
+
+    def stream_logs_blocking(self, job_id: str, from_id: str = "0-0") -> bool:
+        """Convenience wrapper for sync CLIs. Returns True on success."""
+        return asyncio.run(self.stream_logs(job_id, from_id))
 
 api_client = ApiClient(
     base_url=settings.THOA_API_URL,

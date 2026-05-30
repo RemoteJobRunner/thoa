@@ -50,7 +50,7 @@ def run_cmd(
         None, "--tools", help="List of tools (e.g., bwa, samtools=1.9). Use multiple flags or comma-separated values."
     ),
     env_source: Optional[Path] = typer.Option(
-        None, "--env-source", help="Environment specifier (e.g., environment.yml, env-name)."
+        None, "--env-source", help="Path to an environment file (.yml or .txt), or 'use-current' to capture the active conda/venv/Python environment."
     ),
     env_id: Optional[str] = typer.Option(
         None, "--env-id", help="UUID of an existing environment to reuse (mutually exclusive with --tools and --env-source)."
@@ -82,6 +82,15 @@ def run_cmd(
     ),
     verbose: bool = typer.Option(
         False, "--verbose", help="Enable verbose output."
+    ),
+    strict: bool = typer.Option(
+        False, "--strict", help="Disable AI auto-retries. Job will not be retried if it fails."
+    ),
+    max_attempts: int = typer.Option(
+        3, "--max-attempts", help="Maximum number of AI retry attempts (default 3)."
+    ),
+    disable_preflight: bool = typer.Option(
+        False, "--disable-preflight", help="Skip preflight resource validation checks."
     ),
 ):
 
@@ -122,6 +131,9 @@ def run_cmd(
         verbose=verbose,
         has_input_data=has_input_data,
         use_existing_input_dataset=bool(input_dataset),
+        strict=strict,
+        max_attempts=max_attempts,
+        disable_preflight=disable_preflight,
     )
 
     

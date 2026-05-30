@@ -43,11 +43,30 @@ from thoa.core.remote_inputs import (
     detect_remote_ref_kind,
     extract_google_drive_folder_id,
     import_google_drive_input,
+    print_manifest_summary,
     project_input_context,
+    track_transfer_progress,
 )
 from thoa.core.job_status import JobStatus, UPLOAD_STATUSES
 
 max_threads = min(32, os.cpu_count() * 2)
+
+
+def _print_staged_paths(rel_paths: list) -> None:
+    """Print up to five entries from a job's adjusted input context.
+
+    Mirrors the truncation rule used for input-dataset display so both
+    branches look the same: full list when <=5 items, else first four +
+    ellipsis + last.
+    """
+    if len(rel_paths) <= 5:
+        for rel_path in rel_paths:
+            console.print(f"  ./{rel_path}")
+    else:
+        for rel_path in rel_paths[:4]:
+            console.print(f"  ./{rel_path}")
+        console.print("  ...")
+        console.print(f"  ./{rel_paths[-1]}")
 
 
 def _print_env_build_failure(job_id: str) -> None:
@@ -61,6 +80,49 @@ def _print_env_build_failure(job_id: str) -> None:
             console.print(build_logs)
     except Exception:
         pass
+
+
+def _handle_validation_failure(job_public_id: str) -> bool:
+    """
+    Called immediately after detecting FAILED_VALIDATION.
+    Waits for the job to enter RETRYING (AI is working), then waits for it to resolve.
+    Returns True if the AI fixed it and the caller should continue.
+    Returns False if validation permanently failed.
+    """
+    _print_env_build_failure(job_public_id)
+
+    # Wait up to 20 s for the flow to set the status to RETRYING (hook fires quickly)
+    with console.status("Waiting for AI to analyze the environment failure...", spinner="dots12"):
+        deadline = time.time() + 20
+        while time.time() < deadline:
+            time.sleep(3)
+            if current_job_status(job_public_id) != JobStatus.FAILED_VALIDATION:
+                break
+        else:
+            return False  # AI never picked it up
+
+        # Now wait while the AI is actively working
+        while current_job_status(job_public_id) == JobStatus.RETRYING:
+            time.sleep(3)
+
+    if current_job_status(job_public_id) == JobStatus.FAILED_VALIDATION:
+        _print_env_build_failure(job_public_id)
+        return False  # AI couldn't fix it
+
+    console.print("[yellow]AI is retrying with a corrected environment...[/yellow]")
+
+    with console.status("Re-validating corrected environment...", spinner="dots12"):
+        while current_job_status(job_public_id) in {
+            JobStatus.VALIDATING, JobStatus.QUEUED, JobStatus.PENDING, JobStatus.CREATED,
+            JobStatus.STAGING, JobStatus.PROVISIONING,
+        }:
+            time.sleep(4)
+
+    if current_job_status(job_public_id) == JobStatus.FAILED_VALIDATION:
+        _print_env_build_failure(job_public_id)
+        return False  # second failure — give up
+
+    return True  # validation passed, caller continues normal flow
 
 
 def _print_dry_run_summary(
@@ -127,6 +189,9 @@ def run_cmd(
     verbose: bool = False,
     has_input_data: bool = True,
     use_existing_input_dataset: bool = False,
+    strict: bool = False,
+    max_attempts: int = 3,
+    disable_preflight: bool = False,
 ):
     
     """Run the job with the given configuration using the Bioconda-based execution environment."""
@@ -252,8 +317,12 @@ def run_cmd(
         all_files = []
         input_dataset = input_dataset.strip()
         input_dataset_response = api_client.get(f"/datasets?public_id={input_dataset}&include_adjusted_context=True&include_jobs_as_input=False&include_jobs_as_output=False")[0]
-        if input_dataset_response.get("deletion_pending"):
-            console.print("[bold red]Error:[/bold red] Dataset is pending deletion and cannot be used as input.")
+        dataset_status = input_dataset_response.get("status")
+        if dataset_status in ("deleting", "deleted"):
+            console.print("[bold red]Error:[/bold red] Dataset is being deleted or has been deleted and cannot be used as input.")
+            raise typer.Exit(code=1)
+        if dataset_status == "creating":
+            console.print("[bold red]Error:[/bold red] Dataset upload is still in progress and cannot be used as input yet.")
             raise typer.Exit(code=1)
 
         dataset_size_bytes = input_dataset_response.get("total_size") or 0
@@ -296,6 +365,9 @@ def run_cmd(
         dry_run=dry_run,
         verbose=verbose,
     )
+
+    if import_transfer_public_id:
+        print_manifest_summary(imported_input.get("manifest"))
     
     # STEP 0: Validate that the user has sufficient resources to run the job
     valid = validate_user_command(n_cores=n_cores, ram=ram, storage=storage)
@@ -364,6 +436,9 @@ def run_cmd(
             "import_transfer_public_id": import_transfer_public_id,
             "export_transfer_public_id": export_transfer_public_id,
             "input_mount_root": input_root,
+            "strict": strict,
+            "max_attempts": max_attempts,
+            "disable_preflight": disable_preflight,
         })
 
         # Always set script/cwd/output metadata so backend can build run_command
@@ -448,61 +523,117 @@ def run_cmd(
 
 
     # STEP 4: Hash the file objects and create them on the server, as well as the input dataset object
-    with console.status(f"Hashing File Objects", spinner="dots12"):
-
-        # No inputs provided at all
-        if not input_dataset and not inputs:
-            console.print("[yellow]No input files specified. Skipping input upload.[/yellow]")
-            new_input_dataset = None
-            names_to_public_ids = {}
-
-        elif input_dataset:
-            console.print(f"[green]Using dataset {input_dataset} as job input.[/green]")
-            console.print("[yellow]Using existing input dataset. Files will be staged under:[/yellow]")
-            rel_paths = list(input_dataset_response.get("adjusted_context", {}).keys())
-            if len(rel_paths) <= 5:
-                for rel_path in rel_paths:
-                    console.print(f"  ./{rel_path}")
-            else:
-                for rel_path in rel_paths[:4]:
-                    console.print(f"  ./{rel_path}")
-                console.print(f"  ...")
-                console.print(f"  ./{rel_paths[-1]}")
-            new_input_dataset = None
-            names_to_public_ids = {}
-
-        elif inputs:
-
-            all_files = collect_files(inputs)
-            file_sizes = file_sizes_in_bytes(all_files)
-            all_hashes = hash_all(all_files)
-            file_responses = []
-            local_path_by_public_id = {}
-
-            for path, size in file_sizes.items():
-                response = api_client.post("/files", json={
-                    "filename": str(path),
-                    "md5sum": all_hashes[path],
-                    "size": size,
-                })
-                file_responses.append(response)
-                local_path_by_public_id[response["public_id"]] = str(path)
-
-            names_to_public_ids = {f['filename']: f['public_id'] for f in file_responses}
-
-            new_input_dataset = api_client.post("/datasets", json={
-                "files": [f['public_id'] for f in file_responses],
-            })
-
-        # Only update if we have an input dataset
-        if new_input_dataset:
-            updated_job_response = api_client.put(
-                f"/jobs/{job_response['public_id']}",
-                json={
-                    "input_dataset_public_id": new_input_dataset["public_id"],
-                    "input_context": names_to_public_ids 
-                }
+    if import_transfer_public_id:
+        # Google Drive deferred import: wait for the import transfer to
+        # finish (showing per-file progress), then briefly poll until the
+        # backend has populated job.input_context, then print the same
+        # staged-paths block the dataset branch prints.
+        import_final = track_transfer_progress(
+            import_transfer_public_id,
+            label="Importing Google Drive data",
+        )
+        if import_final.get("status") == "failed":
+            transfer_view = api_client.get(
+                f"/data-transfers/{import_transfer_public_id}"
             )
+            console.print(
+                "[bold red]Google Drive import failed:[/bold red] "
+                f"{(transfer_view or {}).get('error_message') or 'unknown error'}"
+            )
+            raise typer.Exit(code=1)
+        console.print(
+            f"[green]Imported {import_final.get('completed_items', 0)} file(s), "
+            f"{import_final.get('completed_bytes', 0)} bytes "
+            f"(skipped {import_final.get('skipped_items', 0)})[/green]"
+        )
+
+        poll_deadline = time.time() + 30 * 60
+        job_view = None
+        with console.status("Resolving Google Drive inputs", spinner="dots12"):
+            while True:
+                results = api_client.get(
+                    f"/jobs?public_id={job_response['public_id']}"
+                    "&include_adjusted_context=True"
+                )
+                if results and results[0].get("input_context"):
+                    job_view = results[0]
+                    break
+                if time.time() > poll_deadline:
+                    console.print(
+                        "[bold red]Timed out waiting for Google Drive import.[/bold red]"
+                    )
+                    raise typer.Exit(code=1)
+                time.sleep(2)
+
+        input_ctx = job_view.get("input_context") or {}
+        adjusted = job_view.get("adjusted_input_context") or {}
+        all_known = bool(input_ctx) and all(v for v in input_ctx.values())
+        if all_known:
+            console.print(
+                "[green]Reusing previously-imported Google Drive dataset as job input.[/green]"
+            )
+            console.print(
+                "[yellow]Using existing input dataset. Files will be staged under:[/yellow]"
+            )
+        else:
+            n_new = sum(1 for v in input_ctx.values() if not v)
+            console.print(
+                f"[green]Importing {n_new} file(s) from Google Drive as job input.[/green]"
+            )
+            console.print("[yellow]Files will be staged under:[/yellow]")
+        _print_staged_paths(list(adjusted.keys()))
+        new_input_dataset = None
+        names_to_public_ids = {}
+
+    else:
+        with console.status(f"Hashing File Objects", spinner="dots12"):
+
+            # No inputs provided at all
+            if not input_dataset and not inputs:
+                console.print("[yellow]No input files specified. Skipping input upload.[/yellow]")
+                new_input_dataset = None
+                names_to_public_ids = {}
+
+            elif input_dataset:
+                console.print(f"[green]Using dataset {input_dataset} as job input.[/green]")
+                console.print("[yellow]Using existing input dataset. Files will be staged under:[/yellow]")
+                rel_paths = list(input_dataset_response.get("adjusted_context", {}).keys())
+                _print_staged_paths(rel_paths)
+                new_input_dataset = None
+                names_to_public_ids = {}
+
+            elif inputs:
+
+                all_files = collect_files(inputs)
+                file_sizes = file_sizes_in_bytes(all_files)
+                all_hashes = hash_all(all_files)
+                file_responses = []
+                local_path_by_public_id = {}
+
+                for path, size in file_sizes.items():
+                    response = api_client.post("/files", json={
+                        "filename": str(path),
+                        "md5sum": all_hashes[path],
+                        "size": size,
+                    })
+                    file_responses.append(response)
+                    local_path_by_public_id[response["public_id"]] = str(path)
+
+                names_to_public_ids = {f['filename']: f['public_id'] for f in file_responses}
+
+                new_input_dataset = api_client.post("/datasets", json={
+                    "files": [f['public_id'] for f in file_responses],
+                })
+
+            # Only update if we have an input dataset
+            if new_input_dataset:
+                updated_job_response = api_client.put(
+                    f"/jobs/{job_response['public_id']}",
+                    json={
+                        "input_dataset_public_id": new_input_dataset["public_id"],
+                        "input_context": names_to_public_ids
+                    }
+                )
             
     if new_input_dataset:
         # STEP 5: Create signed azure URLs for the file objects
@@ -572,8 +703,8 @@ def run_cmd(
                 time.sleep(4)
 
         if current_job_status(updated_job_response['public_id']) == JobStatus.FAILED_VALIDATION:
-            _print_env_build_failure(updated_job_response['public_id'])
-            raise typer.Exit(code=1)
+            if not _handle_validation_failure(updated_job_response['public_id']):
+                raise typer.Exit(code=1)
 
         # STEP 8: Poll the server for disk creation and copy status
         with console.status(f"Staging your files", spinner="dots12"):
@@ -590,8 +721,8 @@ def run_cmd(
                 time.sleep(4)
 
         if current_job_status(updated_job_response['public_id']) == JobStatus.FAILED_VALIDATION:
-            _print_env_build_failure(updated_job_response['public_id'])
-            raise typer.Exit(code=1)
+            if not _handle_validation_failure(updated_job_response['public_id']):
+                raise typer.Exit(code=1)
 
         with console.status(f"Staging your data", spinner="dots12"):
             while current_job_status(updated_job_response['public_id']) == JobStatus.STAGING:
@@ -607,8 +738,8 @@ def run_cmd(
                 time.sleep(4)
 
         if current_job_status(updated_job_response['public_id']) == JobStatus.FAILED_VALIDATION:
-            _print_env_build_failure(updated_job_response['public_id'])
-            raise typer.Exit(code=1)
+            if not _handle_validation_failure(updated_job_response['public_id']):
+                raise typer.Exit(code=1)
 
     if run_async:
         console.print(Panel(
@@ -628,8 +759,8 @@ def run_cmd(
             time.sleep(4)
 
     if current_job_status(updated_job_response['public_id']) == JobStatus.FAILED_VALIDATION:
-        _print_env_build_failure(updated_job_response['public_id'])
-        raise typer.Exit(code=1)
+        if not _handle_validation_failure(updated_job_response['public_id']):
+            raise typer.Exit(code=1)
 
     # STEP 11: Wait until the VM is ready to stream logs, then connect
     with console.status(f"Connecting to your job VM", spinner="dots12"):
@@ -640,18 +771,134 @@ def run_cmd(
             time.sleep(4)
 
     if current_job_status(updated_job_response['public_id']) == JobStatus.FAILED_VALIDATION:
-        _print_env_build_failure(updated_job_response['public_id'])
-        raise typer.Exit(code=1)
+        if not _handle_validation_failure(updated_job_response['public_id']):
+            raise typer.Exit(code=1)
 
-    api_client.stream_logs_blocking(job_response['public_id'], from_id="0-0")
+    # STEP 11b: Stream logs for each attempt, following AI retries
+    job_public_id = job_response['public_id']
+    seen_attempt_numbers: set[int] = set()
+
+    def _get_attempts() -> list[dict]:
+        result = api_client.get(f"/jobs/{job_public_id}/attempts")
+        return result if isinstance(result, list) else []
+
+    def _stream_attempt(attempt: dict) -> bool:
+        """Stream logs for one attempt. Returns True on success."""
+        n = attempt['attempt_number']
+        console.print(f"\n[bold]Attempt {n}[/bold]")
+        # Pass job_public_id — the gateway resolves it to the latest attempt's Redis stream
+        succeeded = api_client.stream_logs_blocking(job_public_id, from_id="0-0")
+        return succeeded
+
+    def _wait_for_attempt_running(attempt_public_id: str, timeout: int = 300) -> bool:
+        """Poll until attempt is running (or terminal). Returns True if running/completed."""
+        deadline = time.time() + timeout
+        running_or_terminal = {
+            JobStatus.RUNNING, JobStatus.COMPLETED, JobStatus.FAILED_EXECUTION,
+            JobStatus.FAILED_STARTUP, JobStatus.CANCELLED, JobStatus.FAILED_VALIDATION,
+        }
+        while time.time() < deadline:
+            attempt_data = api_client.get(f"/attempts/{attempt_public_id}")
+            if attempt_data and attempt_data.get("status") in running_or_terminal:
+                return True
+            time.sleep(4)
+        return False
+
+    # Stream all attempts (starting from what's already running)
+    final_succeeded = False
+    while True:
+        attempts = _get_attempts()
+        # Find the next unseen attempt
+        next_attempt = next(
+            (a for a in attempts if a['attempt_number'] not in seen_attempt_numbers),
+            None
+        )
+        if next_attempt is None:
+            # No new attempt yet — wait briefly and check again (AI may be creating one)
+            time.sleep(4)
+            attempts = _get_attempts()
+            next_attempt = next(
+                (a for a in attempts if a['attempt_number'] not in seen_attempt_numbers),
+                None
+            )
+            if next_attempt is None:
+                break
+
+        n = next_attempt['attempt_number']
+        seen_attempt_numbers.add(n)
+
+        if n > 1:
+            # Show what the AI changed
+            ai_note = next_attempt.get('ai_note') or ''
+            if ai_note:
+                console.print(f"\n[yellow]AI retry — Attempt {n}:[/yellow] {ai_note}")
+            else:
+                console.print(f"\n[yellow]AI is retrying with Attempt {n}...[/yellow]")
+            with console.status(f"Waiting for Attempt {n} to start", spinner="dots12"):
+                _wait_for_attempt_running(next_attempt['public_id'])
+
+        succeeded = _stream_attempt(next_attempt)
+        final_succeeded = succeeded
+
+        if succeeded:
+            break
+
+        # Failure — wait while AI is analyzing (job status == RETRYING), then check for new attempt
+        console.print(f"\n[bold red]Attempt {n} failed.[/bold red]")
+        found_next = False
+        # Give the flow up to 15 s to transition the job to RETRYING
+        deadline_retrying = time.time() + 15
+        while time.time() < deadline_retrying:
+            if current_job_status(job_public_id) == JobStatus.RETRYING:
+                break
+            time.sleep(3)
+
+        if current_job_status(job_public_id) == JobStatus.RETRYING:
+            with console.status("AI is analyzing the failure, waiting for retry...", spinner="dots12"):
+                while current_job_status(job_public_id) == JobStatus.RETRYING:
+                    time.sleep(3)
+            fresh_attempts = _get_attempts()
+            found_next = len(fresh_attempts) > len(seen_attempt_numbers)
+        if not found_next:
+            # Fetch the latest attempt to surface any AI diagnosis note
+            fresh_attempts = _get_attempts()
+            last_attempt = fresh_attempts[-1] if fresh_attempts else None
+            ai_note = (last_attempt or {}).get('ai_note') or ''
+            if ai_note:
+                console.print(f"\n[yellow]AI diagnosis:[/yellow] {ai_note}")
+            console.print("[red]No further attempts. Job failed.[/red]")
+            break
+
+    if not final_succeeded:
+        raise typer.Exit(code=1)
 
     # STEP 12: Download output files to the local machine
     with console.status(f"Job Completed! Preparing your output dataset", spinner="dots12"):
         while current_job_status(updated_job_response['public_id']) == JobStatus.CLEANUP:
-            time.sleep(4) 
+            time.sleep(4)
             if current_job_status(updated_job_response['public_id']) == JobStatus.COMPLETED:
                 break
- 
+
+    if export_transfer_public_id:
+        # Job is done; the backend has kicked off the export-to-Drive transfer.
+        # Show per-file progress until the export terminates.
+        export_final = track_transfer_progress(
+            export_transfer_public_id,
+            label="Exporting to Google Drive",
+        )
+        if export_final.get("status") == "failed":
+            export_blob = api_client.get(f"/data-transfers/{export_transfer_public_id}")
+            error = (export_blob or {}).get("error_message") or "unknown error"
+            console.print(
+                f"[bold red]Google Drive export failed:[/bold red] {error}"
+            )
+        else:
+            console.print(
+                f"[green]Exported {export_final.get('completed_items', 0)} file(s), "
+                f"{export_final.get('completed_bytes', 0)} bytes "
+                f"to Google Drive[/green]"
+            )
+
     if current_job_status(updated_job_response['public_id']) == JobStatus.CANCELLED:
         console.print("[yellow]Job was cancelled. No output files will be downloaded.[/yellow]")
         raise typer.Exit(code=1)

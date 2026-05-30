@@ -1,8 +1,8 @@
-name: Nightly Integration Tests
+name: Integration Tests
 
 on:
-  schedule:
-    - cron: '0 3 * * *'
+  push:
+    branches: [main]
   workflow_dispatch: {}
 
 jobs:
@@ -27,13 +27,13 @@ jobs:
       - name: Install dependencies
         run: |
           poetry install
-          poetry run pip install pytest
+          poetry run pip install pytest pytest-timeout
 
       - name: Run integration tests
         env:
           THOA_STAGING_API_URL: https://test-api.thoa.io
           THOA_STAGING_API_KEY: ${{ secrets.THOA_STAGING_API_KEY }}
-        run: poetry run pytest tests/integration/ -v --tb=short
+        run: poetry run pytest tests/integration/ -v --tb=short --timeout=900 --timeout-method=thread
 
       - name: Summary
         if: always()

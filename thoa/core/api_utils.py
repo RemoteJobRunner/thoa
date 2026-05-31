@@ -37,8 +37,7 @@ class ErrorReadouts:
         elif self.status_code == 426:
             rprint(
                 "[bold red]426 Upgrade Required: Your thoa CLI is outdated.[/bold red]\n\n"
-                f"[yellow]SERVER MESSAGE:\n{self.detail}[/yellow]\n\n"
-                "[bold yellow]Run: pip install -U thoa[/bold yellow]"
+                f"[yellow]SERVER MESSAGE:\n{self.detail}[/yellow]"
             )
 
         else: 

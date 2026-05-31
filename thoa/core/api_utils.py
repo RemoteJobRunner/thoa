@@ -5,14 +5,7 @@ from rich import print as rprint
 import asyncio, json, websockets
 from rich.console import Console
 from rich.text import Text
-from importlib.metadata import version as _pkg_version, PackageNotFoundError
-
-
-def _thoa_version() -> str:
-    try:
-        return _pkg_version("thoa")
-    except PackageNotFoundError:
-        return "0.0.0"
+from thoa.core.version_check import current_version
 
 
 console = Console()
@@ -62,7 +55,7 @@ class ApiClient:
             headers={
                 "X-API-Key": self.api_key if self.api_key else "",
                 "Accept": "application/json",
-                "X-Client-Version": _thoa_version(),
+                "X-Client-Version": current_version(),
             },
             timeout=httpx.Timeout(timeout),
         )

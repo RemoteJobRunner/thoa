@@ -8,7 +8,7 @@ from packaging.version import Version, InvalidVersion
 _TIMEOUT_SECONDS = 1.5
 
 
-def _current_version() -> str:
+def current_version() -> str:
     try:
         return _pkg_version("thoa")
     except PackageNotFoundError:
@@ -28,7 +28,7 @@ def check_min_client_version(base_url: str) -> None:
         min_str = resp.json().get("min_client_version")
         if not min_str:
             return
-        current = Version(_current_version())
+        current = Version(current_version())
         minimum = Version(min_str)
         if current < minimum:
             print(

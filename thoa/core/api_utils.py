@@ -1,8 +1,9 @@
 import httpx
+import time
 from typing import Optional
 from thoa.config import settings
 from rich import print as rprint
-import asyncio, json, websockets 
+import asyncio, json, websockets
 from rich.console import Console
 from rich.text import Text
 
@@ -65,7 +66,19 @@ class ApiClient:
             return
 
         api_path = f"/api{path}"
-        response = self.client.request(method, api_path, **kwargs)
+        deadline = time.monotonic() + 600  # retry for up to 10 minutes on network errors
+        first_retry = True
+        while True:
+            try:
+                response = self.client.request(method, api_path, **kwargs)
+                break
+            except (httpx.RemoteProtocolError, httpx.ConnectError):
+                if time.monotonic() > deadline:
+                    raise
+                if first_retry:
+                    rprint("[yellow]Connection lost, retrying...[/yellow]")
+                    first_retry = False
+                time.sleep(5)
 
         if response.status_code == 200:
             if settings.THOA_API_DEBUG:
@@ -120,50 +133,61 @@ class ApiClient:
             "Accept": "application/json",
         }
 
-        succeeded = False
-        async with websockets.connect(
-            url,
-            additional_headers=headers,
-            ping_interval=20,
-            ping_timeout=20
-        ) as ws:
-            async for raw in ws:
-                try:
-                    msg = json.loads(raw)
-                except Exception:
-                    console.print(raw)
-                    continue
+        deadline = time.monotonic() + 600  # retry for up to 10 minutes on connection errors
+        first_retry = True
+        while True:
+            try:
+                succeeded = False
+                async with websockets.connect(
+                    url,
+                    additional_headers=headers,
+                    ping_interval=20,
+                    ping_timeout=20
+                ) as ws:
+                    async for raw in ws:
+                        try:
+                            msg = json.loads(raw)
+                        except Exception:
+                            console.print(raw)
+                            continue
 
-                if msg.get("event") == "keepalive":
-                    continue
+                        if msg.get("event") == "keepalive":
+                            continue
 
-                if msg.get("event") == "connected":
-                    continue
+                        if msg.get("event") == "connected":
+                            continue
 
-                if msg.get("event") == "cancelled":
-                    console.print("[bold red]Job was cancelled.[/bold red]")
-                    await ws.close()
-                    break
+                        if msg.get("event") == "cancelled":
+                            console.print("[bold red]Job was cancelled.[/bold red]")
+                            await ws.close()
+                            break
 
-                if msg.get("event") == "error":
-                    console.print(f"[red]error:[/red] {msg.get('message')}")
-                    break
+                        if msg.get("event") == "error":
+                            console.print(f"[red]error:[/red] {msg.get('message')}")
+                            break
 
-                if msg.get("event") == "done":
-                    succeeded = msg.get("success") == 1
-                    await ws.close()
-                    break
+                        if msg.get("event") == "done":
+                            succeeded = msg.get("success") == 1
+                            await ws.close()
+                            break
 
-                # Standard log entries
-                stream = msg.get("stream")
-                data = msg.get("data", "")
+                        # Standard log entries
+                        stream = msg.get("stream")
+                        data = msg.get("data", "")
 
-                if stream == "stderr":
-                    console.print(f"[orange3][remote stderr][/orange3] {data}", end="")
-                else:
-                    console.print(f"[blue][remote stdout][/blue] {data}", end="")
+                        if stream == "stderr":
+                            console.print(f"[orange3][remote stderr][/orange3] {data}", end="")
+                        else:
+                            console.print(f"[blue][remote stdout][/blue] {data}", end="")
 
-        return succeeded
+                return succeeded
+            except (websockets.exceptions.WebSocketException, OSError):
+                if time.monotonic() > deadline:
+                    raise
+                if first_retry:
+                    rprint("[yellow]Connection lost, retrying...[/yellow]")
+                    first_retry = False
+                await asyncio.sleep(5)
 
     def stream_logs_blocking(self, job_id: str, from_id: str = "0-0") -> bool:
         """Convenience wrapper for sync CLIs. Returns True on success."""

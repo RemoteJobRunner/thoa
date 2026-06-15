@@ -1,8 +1,9 @@
 import httpx
+import time
 from typing import Optional
 from thoa.config import settings
 from rich import print as rprint
-import asyncio, json, websockets 
+import asyncio, json, websockets
 from rich.console import Console
 from rich.text import Text
 
@@ -48,6 +49,7 @@ class ApiClient:
                 "Accept": "application/json",
             },
             timeout=httpx.Timeout(timeout),
+            limits=httpx.Limits(max_keepalive_connections=5, keepalive_expiry=4),
         )
 
     def _request(
@@ -65,7 +67,24 @@ class ApiClient:
             return
 
         api_path = f"/api{path}"
-        response = self.client.request(method, api_path, **kwargs)
+
+        # Retry once on connection-level failures. RemoteProtocolError and ConnectError
+        # both mean the request never reached the server, so retrying is safe for any method.
+        # ReadTimeout after a sent request is only safe to retry for idempotent GETs.
+        for attempt in range(2):
+            try:
+                response = self.client.request(method, api_path, **kwargs)
+                break
+            except (httpx.RemoteProtocolError, httpx.ConnectError):
+                if attempt == 0:
+                    time.sleep(0.5)
+                    continue
+                raise
+            except httpx.ReadTimeout:
+                if method.upper() == "GET" and attempt == 0:
+                    time.sleep(0.5)
+                    continue
+                raise
 
         if response.status_code == 200:
             if settings.THOA_API_DEBUG:
@@ -121,47 +140,53 @@ class ApiClient:
         }
 
         succeeded = False
-        async with websockets.connect(
-            url,
-            additional_headers=headers,
-            ping_interval=20,
-            ping_timeout=20
-        ) as ws:
-            async for raw in ws:
-                try:
-                    msg = json.loads(raw)
-                except Exception:
-                    console.print(raw)
+        for ws_attempt in range(3):
+            try:
+                async with websockets.connect(
+                    url,
+                    additional_headers=headers,
+                    ping_interval=20,
+                    ping_timeout=20,
+                ) as ws:
+                    async for raw in ws:
+                        try:
+                            msg = json.loads(raw)
+                        except Exception:
+                            console.print(raw)
+                            continue
+
+                        if msg.get("event") == "keepalive":
+                            continue
+
+                        if msg.get("event") == "connected":
+                            continue
+
+                        if msg.get("event") == "cancelled":
+                            console.print("[bold red]Job was cancelled.[/bold red]")
+                            await ws.close()
+                            break
+
+                        if msg.get("event") == "error":
+                            console.print(f"[red]error:[/red] {msg.get('message')}")
+                            break
+
+                        if msg.get("event") == "done":
+                            succeeded = msg.get("success") == 1
+                            await ws.close()
+                            break
+
+                        stream = msg.get("stream")
+                        data = msg.get("data", "")
+                        if stream == "stderr":
+                            console.print(f"[orange3][remote stderr][/orange3] {data}", end="")
+                        else:
+                            console.print(f"[blue][remote stdout][/blue] {data}", end="")
+                break  # connection completed normally
+            except websockets.exceptions.InvalidStatus as exc:
+                if exc.response.status_code == 403 and ws_attempt < 2:
+                    await asyncio.sleep(1 + ws_attempt)
                     continue
-
-                if msg.get("event") == "keepalive":
-                    continue
-
-                if msg.get("event") == "connected":
-                    continue
-
-                if msg.get("event") == "cancelled":
-                    console.print("[bold red]Job was cancelled.[/bold red]")
-                    await ws.close()
-                    break
-
-                if msg.get("event") == "error":
-                    console.print(f"[red]error:[/red] {msg.get('message')}")
-                    break
-
-                if msg.get("event") == "done":
-                    succeeded = msg.get("success") == 1
-                    await ws.close()
-                    break
-
-                # Standard log entries
-                stream = msg.get("stream")
-                data = msg.get("data", "")
-
-                if stream == "stderr":
-                    console.print(f"[orange3][remote stderr][/orange3] {data}", end="")
-                else:
-                    console.print(f"[blue][remote stdout][/blue] {data}", end="")
+                raise
 
         return succeeded
 

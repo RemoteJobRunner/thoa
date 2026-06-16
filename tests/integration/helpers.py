@@ -53,9 +53,13 @@ def get_job_status(job_public_id: str) -> str:
 def poll_job_until_terminal(job_public_id: str, timeout: int = 600, interval: int = 10) -> str:
     """Poll job status until it reaches a terminal state or times out.
     Returns the final status string.
-    Terminal states: completed, failed, cancelled, error
+    Terminal states: completed, cleanup, failed, failed_validation,
+    failed_execution, cancelled, error
     """
-    terminal = {"completed", "failed", "cancelled", "error"}
+    terminal = {
+        "completed", "cleanup", "failed",
+        "failed_validation", "failed_execution", "cancelled", "error",
+    }
     deadline = time.time() + timeout
     status = "unknown"
     while time.time() < deadline:

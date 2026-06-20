@@ -54,7 +54,7 @@ def _run_job(cli_args: list[str], allow_failure: bool = False) -> tuple[str, str
 def test_job_2cpu_4ram_no_input():
     job_id, _ = _run_job([
         "run", "--tools", "samtools", "--cmd", "samtools --version",
-        "--n-cores", "2", "--ram", "4", "--storage", "40",
+        "--n-cores", "2", "--ram", "4", "--storage", "20",
     ])
     status = get_job_status(job_id)
     assert status in {"completed", "cleanup"}, f"Job {job_id} status: {status}"
@@ -64,7 +64,7 @@ def test_job_2cpu_4ram_no_input():
 def test_job_4cpu_8ram_no_input():
     job_id, _ = _run_job([
         "run", "--tools", "bwa", "--cmd", "bwa 2>&1 | head -1",
-        "--n-cores", "4", "--ram", "8", "--storage", "40",
+        "--n-cores", "4", "--ram", "8", "--storage", "20",
     ])
     status = get_job_status(job_id)
     assert status in {"completed", "cleanup"}, f"Job {job_id} status: {status}"
@@ -74,7 +74,7 @@ def test_job_4cpu_8ram_no_input():
 def test_job_8cpu_16ram_no_input():
     job_id, _ = _run_job([
         "run", "--tools", "fastqc", "--cmd", "fastqc --version",
-        "--n-cores", "8", "--ram", "16", "--storage", "40",
+        "--n-cores", "8", "--ram", "16", "--storage", "20",
     ])
     status = get_job_status(job_id)
     assert status in {"completed", "cleanup"}, f"Job {job_id} status: {status}"
@@ -90,7 +90,7 @@ def test_job_with_input_file(tmp_path):
     job_id, _ = _run_job([
         "run", "--input", str(test_file), "--tools", "bash",
         "--cmd", "find / -name input.txt -type f 2>/dev/null",
-        "--n-cores", "2", "--ram", "4", "--storage", "40",
+        "--n-cores", "2", "--ram", "4", "--storage", "20",
     ])
     status = get_job_status(job_id)
     assert status in {"completed", "cleanup"}, f"Job {job_id} status: {status}"
@@ -107,7 +107,7 @@ def test_job_with_multiple_input_files(tmp_path):
     job_id, _ = _run_job([
         "run", "--input", str(d), "--tools", "bash",
         "--cmd", "find / -name '*.txt' -type f 2>/dev/null | wc -l",
-        "--n-cores", "2", "--ram", "4", "--storage", "40",
+        "--n-cores", "2", "--ram", "4", "--storage", "20",
     ])
     status = get_job_status(job_id)
     assert status in {"completed", "cleanup"}, f"Job {job_id} status: {status}"
@@ -129,7 +129,7 @@ def test_job_with_invalid_tool():
 
     job = api_post("/jobs", json={
         "requested_ram": 4, "requested_cpu": 2,
-        "requested_disk_space": 40, "has_input_data": False,
+        "requested_disk_space": 20, "has_input_data": False,
         "client_home": "/tmp",
         "max_attempts": 1,
         "disable_preflight": True,
@@ -167,7 +167,7 @@ def test_cancel_running_job_no_error_message():
 
     job = api_post("/jobs", json={
         "requested_ram": 4, "requested_cpu": 2,
-        "requested_disk_space": 40, "has_input_data": False,
+        "requested_disk_space": 20, "has_input_data": False,
         "client_home": "/tmp",
         "max_attempts": 1,
         "disable_preflight": True,
@@ -210,7 +210,7 @@ def test_job_script_failure():
     """
     job_id, _ = _run_job([
         "run", "--tools", "bash", "--cmd", "echo 'about to fail' && exit 1",
-        "--n-cores", "2", "--ram", "4", "--storage", "40",
+        "--n-cores", "2", "--ram", "4", "--storage", "20",
     ], allow_failure=True)
     status = get_job_status(job_id)
     assert status in {"failed_execution", "failed"}, f"Job {job_id} status: {status}"
@@ -231,7 +231,7 @@ def test_dataset_download_after_job(tmp_path):
         "--cmd", "mkdir -p /tmp/thoa_test_output && echo 'hello from test' > /tmp/thoa_test_output/result.txt",
         "--output", "/tmp/thoa_test_output",
         "--download-dir", str(download_dir),
-        "--n-cores", "2", "--ram", "4", "--storage", "40",
+        "--n-cores", "2", "--ram", "4", "--storage", "20",
     ])
 
     resp = api_get("/jobs", params={"public_id": job_id})

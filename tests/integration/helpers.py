@@ -2,6 +2,8 @@ import time
 import httpx
 import os
 
+from thoa.core.version_check import current_version
+
 
 def api_url() -> str:
     return os.environ.get("THOA_STAGING_API_URL", os.environ.get("THOA_API_URL", ""))
@@ -12,7 +14,7 @@ def api_key() -> str:
 
 
 def api_headers() -> dict:
-    return {"X-API-Key": api_key(), "Accept": "application/json"}
+    return {"X-API-Key": api_key(), "Accept": "application/json", "X-Client-Version": current_version()}
 
 
 def api_get(path: str, **kwargs) -> httpx.Response:

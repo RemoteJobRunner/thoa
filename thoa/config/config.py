@@ -18,3 +18,12 @@ class Settings(BaseSettings):
             return (env_settings,)
 
 settings = Settings()
+
+
+def get_api_key() -> Optional[str]:
+    """Return the active API key: env var takes precedence over credentials file."""
+    if settings.THOA_API_KEY:
+        return settings.THOA_API_KEY
+    from thoa.core.credentials import read_credentials
+    creds = read_credentials()
+    return creds.get("api_key") if creds else None

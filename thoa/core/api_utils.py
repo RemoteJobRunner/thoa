@@ -1,6 +1,6 @@
 import httpx
 from typing import Optional
-from thoa.config import settings
+from thoa.config import settings, get_api_key
 from rich import print as rprint
 import asyncio, json, websockets
 from rich.console import Console
@@ -18,13 +18,15 @@ class ErrorReadouts:
     def readout(self):
         if self.status_code == 403:
             rprint("[bold red]403 Forbidden: You're not allowed to access this resource.[/bold red]\n\n"
-               "[yellow]HINT: Have you set your API key in the environment variable THOA_API_KEY\n"
-               "(e.g. 'echo $THOA_API_KEY')?[/yellow]")
-            
-        elif self.status_code == 401: 
-            rprint("[bold red]401 Unauthorized: Authentication is required and has failed or has not yet been provided.[/bold red]\n\n"
-               "[yellow]HINT: Have you set your API key in the environment variable THOA_API_KEY\n"
-               "(e.g. 'echo $THOA_API_KEY')?[/yellow]")
+               "[yellow]HINT: Run [bold]thoa login[/bold] to authenticate, or set THOA_API_KEY in your environment.[/yellow]")
+
+        elif self.status_code == 401:
+            expired_hint = ""
+            if self.detail and "expired" in str(self.detail).lower():
+                expired_hint = f"\n[yellow]{self.detail}[/yellow]"
+            else:
+                expired_hint = "\n[yellow]HINT: Run [bold]thoa login[/bold] to authenticate, or set THOA_API_KEY in your environment.[/yellow]"
+            rprint(f"[bold red]401 Unauthorized: Authentication is required and has failed or has not yet been provided.[/bold red]{expired_hint}")
             
         elif self.status_code == 400: 
             rprint("[bold red]400 Bad Request: The request was invalid or cannot be served.[/bold red]\n\n"
@@ -64,13 +66,13 @@ class ApiClient:
         method: str,
         path: str,
         *,
+        require_auth: bool = True,
         silent_status_codes: set[int] | None = None,
         **kwargs,
     ):
-
-        if not self.api_key:
-            rprint("[bold red]ERROR: No API key provided. Please set the THOA_API_KEY environment variable.[/bold red]\n")
-            rprint(f"You can obtain an API key from the THOA web interface at [blue]{settings.THOA_UI_URL}/workbench/api_keys[/blue]")
+        if require_auth and not self.api_key:
+            rprint("[bold red]ERROR: Not authenticated.[/bold red]\n")
+            rprint("Run [bold]thoa login[/bold] to authenticate, or set the THOA_API_KEY environment variable.")
             return
 
         api_path = f"/api{path}"
@@ -96,14 +98,17 @@ class ApiClient:
             ErrorReadouts(response.status_code, detail).readout()
             return
 
-    def get(self, path: str, *, silent_status_codes: set[int] | None = None, **kwargs):
-        return self._request("GET", path, silent_status_codes=silent_status_codes, **kwargs)
+    def get(self, path: str, *, require_auth: bool = True, silent_status_codes: set[int] | None = None, **kwargs):
+        return self._request("GET", path, require_auth=require_auth, silent_status_codes=silent_status_codes, **kwargs)
 
-    def post(self, path: str, *, silent_status_codes: set[int] | None = None, **kwargs):
-        return self._request("POST", path, silent_status_codes=silent_status_codes, **kwargs)
+    def post(self, path: str, *, require_auth: bool = True, silent_status_codes: set[int] | None = None, **kwargs):
+        return self._request("POST", path, require_auth=require_auth, silent_status_codes=silent_status_codes, **kwargs)
 
-    def put(self, path: str, *, silent_status_codes: set[int] | None = None, **kwargs):
-        return self._request("PUT", path, silent_status_codes=silent_status_codes, **kwargs)
+    def put(self, path: str, *, require_auth: bool = True, silent_status_codes: set[int] | None = None, **kwargs):
+        return self._request("PUT", path, require_auth=require_auth, silent_status_codes=silent_status_codes, **kwargs)
+
+    def delete(self, path: str, *, require_auth: bool = True, silent_status_codes: set[int] | None = None, **kwargs):
+        return self._request("DELETE", path, require_auth=require_auth, silent_status_codes=silent_status_codes, **kwargs)
 
     def close(self):
         self.client.close()
@@ -180,6 +185,6 @@ class ApiClient:
 
 api_client = ApiClient(
     base_url=settings.THOA_API_URL,
-    api_key=settings.THOA_API_KEY,
+    api_key=get_api_key(),
     timeout=settings.THOA_API_TIMEOUT,
 )

@@ -1,1 +1,1 @@
-from .config import settings
+from .config import settings, get_api_key

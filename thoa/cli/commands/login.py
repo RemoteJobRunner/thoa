@@ -66,7 +66,15 @@ def login():
         return
 
     state = str(uuid4())
-    port = _find_free_port()
+    try:
+        port = _find_free_port()
+    except RuntimeError:
+        console.print(
+            f"[bold red]Login failed:[/bold red] no free port found in range "
+            f"{CALLBACK_PORT_START}–{CALLBACK_PORT_END}. "
+            "Free a port or restart your terminal and try again."
+        )
+        raise typer.Exit(code=1)
 
     received: dict = {}
     server_error: list = []

@@ -91,6 +91,7 @@ def test_run_async_exits_after_upload(tmp_path):
     mock_api.get.side_effect = api_get_side_effect
 
     mock_time = MagicMock()
+    mock_time.time.return_value = 0.0  # real float so deadline arithmetic works
 
     with patch("thoa.cli.commands.run.api_client", mock_api), \
          patch("thoa.core.job_utils.api_client", mock_api), \
@@ -143,6 +144,7 @@ def test_run_async_no_inputs_exits_before_provisioning():
     mock_api.get.side_effect = api_get_side_effect
 
     mock_time = MagicMock()
+    mock_time.time.return_value = 0.0  # real float so deadline arithmetic works
 
     with patch("thoa.cli.commands.run.api_client", mock_api), \
          patch("thoa.core.job_utils.api_client", mock_api), \

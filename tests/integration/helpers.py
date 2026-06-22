@@ -2,6 +2,8 @@ import time
 import httpx
 import os
 
+from thoa.core.version_check import current_version
+
 
 def api_url() -> str:
     return os.environ.get("THOA_STAGING_API_URL", os.environ.get("THOA_API_URL", ""))
@@ -12,7 +14,7 @@ def api_key() -> str:
 
 
 def api_headers() -> dict:
-    return {"X-API-Key": api_key(), "Accept": "application/json"}
+    return {"X-API-Key": api_key(), "Accept": "application/json", "X-Client-Version": current_version()}
 
 
 def api_get(path: str, **kwargs) -> httpx.Response:
@@ -53,9 +55,13 @@ def get_job_status(job_public_id: str) -> str:
 def poll_job_until_terminal(job_public_id: str, timeout: int = 600, interval: int = 10) -> str:
     """Poll job status until it reaches a terminal state or times out.
     Returns the final status string.
-    Terminal states: completed, failed, cancelled, error
+    Terminal states: completed, cleanup, failed, failed_validation,
+    failed_execution, cancelled, error
     """
-    terminal = {"completed", "failed", "cancelled", "error"}
+    terminal = {
+        "completed", "cleanup", "failed",
+        "failed_validation", "failed_execution", "cancelled", "error",
+    }
     deadline = time.time() + timeout
     status = "unknown"
     while time.time() < deadline:

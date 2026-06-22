@@ -6,6 +6,8 @@ from .dataset_app import app as dataset_app
 from .commands.tools import app as tools_app
 from .commands.jobs import app as jobs_app
 from .commands.envs import app as envs_app
+from .commands.login import login
+from .commands.logout import logout
 from thoa.core.job_utils import console
 
 app = typer.Typer(help="THOA CLI tool", add_completion=False, context_settings={"help_option_names": ["-h", "--help"]})
@@ -13,6 +15,8 @@ app.add_typer(dataset_app, name="dataset", help="Dataset-related commands")
 app.add_typer(tools_app, name="tools")
 app.add_typer(jobs_app, name="jobs")
 app.add_typer(envs_app, name="envs", help="Environment-related commands")
+app.command("login", help="Authenticate via browser.")(login)
+app.command("logout", help="Revoke your CLI token and sign out.")(logout)
 
 
 @app.command("run")

@@ -12,7 +12,7 @@ import pytest
 from typer.testing import CliRunner
 from thoa.cli import app
 from tests.integration.helpers import (
-    get_job_status, poll_job_until_terminal, api_get, api_post, api_put,
+    get_job_status, poll_job_until_terminal, api_get, api_post, api_put, api_delete,
 )
 
 runner = CliRunner()
@@ -214,6 +214,185 @@ def test_job_script_failure():
     ], allow_failure=True)
     status = get_job_status(job_id)
     assert status in {"failed_execution", "failed"}, f"Job {job_id} status: {status}"
+
+
+# --- local upload via transfer flow ---
+
+@pytest.mark.slow
+def test_local_input_creates_and_attaches_dataset(tmp_path):
+    """Submitting a local --input file creates a ready dataset and attaches it to the job."""
+    test_file = tmp_path / "transfer_test.txt"
+    test_file.write_text("transfer flow integration test")
+
+    job_id, _ = _run_job([
+        "run", "--input", str(test_file), "--tools", "bash",
+        "--cmd", "echo done",
+        "--n-cores", "2", "--ram", "4", "--storage", "20",
+    ])
+
+    # Job must have an input dataset attached (proves transfer flow completed)
+    resp = api_get("/jobs", params={"public_id": job_id})
+    assert resp.status_code == 200
+    job_data = resp.json()[0]
+    input_dataset_id = job_data.get("input_dataset_public_id")
+    assert input_dataset_id, f"Job {job_id} has no input_dataset_public_id"
+
+    # Dataset must be in 'created' state (not 'creating')
+    ds_resp = api_get("/datasets", params={"public_id": input_dataset_id})
+    assert ds_resp.status_code == 200
+    dataset = ds_resp.json()[0]
+    assert dataset["status"] == "created", (
+        f"Dataset {input_dataset_id} status is {dataset['status']!r}, expected 'created'"
+    )
+
+
+@pytest.mark.slow
+def test_local_input_deduplication(tmp_path):
+    """Uploading the same file twice reuses the existing blob.
+
+    Verified by checking that both jobs' input datasets reference the same
+    file public_id — i.e. the second manifest returned upload_required=False
+    and the service reused the existing FileModel row.
+    """
+    test_file = tmp_path / "dedup_test.txt"
+    test_file.write_text("deduplication content — unique enough for this test run")
+
+    job_id_1, _ = _run_job([
+        "run", "--input", str(test_file), "--tools", "bash",
+        "--cmd", "echo done",
+        "--n-cores", "2", "--ram", "4", "--storage", "20",
+    ])
+    assert get_job_status(job_id_1) in {"completed", "cleanup"}
+
+    job_id_2, _ = _run_job([
+        "run", "--input", str(test_file), "--tools", "bash",
+        "--cmd", "echo done",
+        "--n-cores", "2", "--ram", "4", "--storage", "20",
+    ])
+    assert get_job_status(job_id_2) in {"completed", "cleanup"}
+
+    # Both jobs should have different job IDs but share the same underlying file
+    assert job_id_1 != job_id_2
+
+    def _file_ids_for_job(job_id):
+        job = api_get("/jobs", params={"public_id": job_id}).json()[0]
+        ds_id = job.get("input_dataset_public_id")
+        assert ds_id, f"Job {job_id} has no input dataset"
+        files = api_get("/files", params={"dataset_public_id": ds_id}).json()
+        return {f["public_id"] for f in files}
+
+    files_1 = _file_ids_for_job(job_id_1)
+    files_2 = _file_ids_for_job(job_id_2)
+    shared = files_1 & files_2
+    assert shared, (
+        f"No shared file IDs between job 1 ({files_1}) and job 2 ({files_2}) — "
+        f"dedup did not fire"
+    )
+
+
+@pytest.mark.slow
+def test_dataset_deletion_cleans_up_exclusive_files(tmp_path):
+    """Deleting a dataset whose files are not shared removes those files from storage.
+
+    Flow:
+      1. Submit a job with a unique local file so the resulting dataset is the
+         only owner of that file.
+      2. Trigger dataset deletion via the delete_trigger endpoint.
+      3. Poll until the dataset status reaches 'deleted'.
+      4. Confirm the file record is gone from the API (404 / empty list).
+    """
+    test_file = tmp_path / "exclusive_file.txt"
+    # Write content unique enough that no other test has uploaded it
+    test_file.write_text(f"exclusive deletion test — {time.time()}")
+
+    job_id, _ = _run_job([
+        "run", "--input", str(test_file), "--tools", "bash",
+        "--cmd", "echo done",
+        "--n-cores", "2", "--ram", "4", "--storage", "20",
+    ])
+    assert get_job_status(job_id) in {"completed", "cleanup"}
+
+    job_data = api_get("/jobs", params={"public_id": job_id}).json()[0]
+    dataset_id = job_data.get("input_dataset_public_id")
+    assert dataset_id, f"Job {job_id} has no input dataset"
+
+    files_resp = api_get("/files", params={"dataset_public_id": dataset_id}).json()
+    assert files_resp, "Dataset has no files"
+    file_ids = [f["public_id"] for f in files_resp]
+
+    # Trigger deletion flow
+    del_resp = api_delete(f"/datasets/{dataset_id}/delete_trigger")
+    assert del_resp.status_code in {200, 202, 204}, (
+        f"delete_trigger returned {del_resp.status_code}: {del_resp.text}"
+    )
+
+    # Poll until dataset reaches 'deleted' status (deletion flow is async)
+    deadline = time.time() + 300
+    dataset_status = None
+    while time.time() < deadline:
+        ds_resp = api_get("/datasets", params={"public_id": dataset_id})
+        if ds_resp.status_code == 404:
+            dataset_status = "deleted"
+            break
+        datasets = ds_resp.json()
+        if not datasets:
+            dataset_status = "deleted"
+            break
+        dataset_status = datasets[0].get("status")
+        if dataset_status == "deleted":
+            break
+        time.sleep(10)
+
+    assert dataset_status == "deleted", (
+        f"Dataset {dataset_id} status is {dataset_status!r} after 5 min — deletion flow stalled"
+    )
+
+    # File records should be gone for files that were exclusive to this dataset
+    for file_id in file_ids:
+        remaining = api_get("/files", params={"public_id": file_id}).json()
+        assert not remaining, (
+            f"File {file_id} still exists after dataset deletion — exclusive file not cleaned up"
+        )
+
+
+@pytest.mark.slow
+def test_reuse_existing_input_dataset(tmp_path):
+    """Running a job with --input-dataset reuses an existing dataset without re-uploading.
+
+    Flow:
+      1. Run a job with --input to create a dataset.
+      2. Extract the input_dataset_public_id from the completed job.
+      3. Run a second job with --input-dataset <id> pointing at that dataset.
+      4. Verify the second job completes and uses the same dataset.
+    """
+    test_file = tmp_path / "reuse_input.txt"
+    test_file.write_text("content for dataset reuse test")
+
+    # First job: creates the dataset
+    job_id_1, _ = _run_job([
+        "run", "--input", str(test_file), "--tools", "bash",
+        "--cmd", "echo done",
+        "--n-cores", "2", "--ram", "4", "--storage", "20",
+    ])
+    assert get_job_status(job_id_1) in {"completed", "cleanup"}
+
+    job_data_1 = api_get("/jobs", params={"public_id": job_id_1}).json()[0]
+    dataset_id = job_data_1.get("input_dataset_public_id")
+    assert dataset_id, f"First job {job_id_1} has no input_dataset_public_id"
+
+    # Second job: reuses the dataset via --input-dataset (no upload)
+    job_id_2, _ = _run_job([
+        "run", "--input-dataset", dataset_id, "--tools", "bash",
+        "--cmd", "echo done",
+        "--n-cores", "2", "--ram", "4", "--storage", "20",
+    ])
+    assert get_job_status(job_id_2) in {"completed", "cleanup"}
+
+    job_data_2 = api_get("/jobs", params={"public_id": job_id_2}).json()[0]
+    assert job_data_2.get("input_dataset_public_id") == dataset_id, (
+        f"Second job used dataset {job_data_2.get('input_dataset_public_id')!r} "
+        f"instead of the expected {dataset_id!r}"
+    )
 
 
 # --- dataset download after job ---

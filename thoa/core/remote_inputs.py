@@ -267,6 +267,7 @@ def track_transfer_progress(
     *,
     label: str,
     poll_interval_seconds: float = 2.0,
+    show_paths: bool = True,
 ) -> dict:
     """Poll a transfer's manifest until it terminates, showing a progress bar.
 
@@ -307,9 +308,10 @@ def track_transfer_progress(
                 if path in seen:
                     continue
                 seen.add(path)
-                progress.console.log(
-                    f"[{len(seen)}/{importable or len(seen)}] {path}"
-                )
+                if show_paths:
+                    progress.console.log(
+                        f"[{len(seen)}/{importable or len(seen)}] {path}"
+                    )
             progress.update(task, completed=min(len(seen), importable or len(seen)))
 
             if status in ("completed", "failed"):

@@ -47,6 +47,7 @@ from thoa.core.remote_inputs import (
     project_input_context,
     track_transfer_progress,
 )
+from thoa.core.local_transfer import create_dataset
 from thoa.core.job_status import JobStatus, UPLOAD_STATUSES
 
 max_threads = min(32, os.cpu_count() * 2)
@@ -595,47 +596,28 @@ def run_cmd(
         names_to_public_ids = {}
 
     else:
-        with console.status(f"Hashing File Objects", spinner="dots12"):
+        # No inputs provided at all
+        if not input_dataset and not inputs:
+            console.print("[yellow]No input files specified. Skipping input upload.[/yellow]")
+            new_input_dataset = None
+            names_to_public_ids = {}
 
-            # No inputs provided at all
-            if not input_dataset and not inputs:
-                console.print("[yellow]No input files specified. Skipping input upload.[/yellow]")
-                new_input_dataset = None
-                names_to_public_ids = {}
+        elif input_dataset:
+            console.print(f"[green]Using dataset {input_dataset} as job input.[/green]")
+            console.print("[yellow]Using existing input dataset. Files will be staged under:[/yellow]")
+            rel_paths = list(input_dataset_response.get("adjusted_context", {}).keys())
+            _print_staged_paths(rel_paths)
+            new_input_dataset = None
+            names_to_public_ids = {}
 
-            elif input_dataset:
-                console.print(f"[green]Using dataset {input_dataset} as job input.[/green]")
-                console.print("[yellow]Using existing input dataset. Files will be staged under:[/yellow]")
-                rel_paths = list(input_dataset_response.get("adjusted_context", {}).keys())
-                _print_staged_paths(rel_paths)
-                new_input_dataset = None
-                names_to_public_ids = {}
+        elif inputs:
+            _ds = create_dataset(inputs)
+            new_input_dataset = {"public_id": _ds["dataset_public_id"]}
+            names_to_public_ids = _ds["input_context"]
 
-            elif inputs:
-
-                all_files = collect_files(inputs)
-                file_sizes = file_sizes_in_bytes(all_files)
-                all_hashes = hash_all(all_files)
-                file_responses = []
-                local_path_by_public_id = {}
-
-                for path, size in file_sizes.items():
-                    response = api_client.post("/files", json={
-                        "filename": str(path),
-                        "md5sum": all_hashes[path],
-                        "size": size,
-                    })
-                    file_responses.append(response)
-                    local_path_by_public_id[response["public_id"]] = str(path)
-
-                names_to_public_ids = {f['filename']: f['public_id'] for f in file_responses}
-
-                new_input_dataset = api_client.post("/datasets", json={
-                    "files": [f['public_id'] for f in file_responses],
-                })
-
-            # Only update if we have an input dataset
-            if new_input_dataset:
+        # Only update if we have an input dataset
+        if new_input_dataset:
+            with console.status("Attaching dataset to job...", spinner="dots12"):
                 updated_job_response = api_client.put(
                     f"/jobs/{job_response['public_id']}",
                     json={
@@ -645,51 +627,7 @@ def run_cmd(
                 )
             
     if new_input_dataset:
-        # STEP 5: Create signed azure URLs for the file objects
-        with console.status(f"Creating Upload URLs for your files", spinner="dots12"):
-            
-            while not all_files_have_upload_links(
-                updated_job_response['public_id'], 
-                new_input_dataset['public_id'],
-                [f.get("public_id") for f in file_responses]
-            ):
-                time.sleep(4)
-
-            upload_links = api_client.get("/temporary_links", params={
-                "dataset_public_id": new_input_dataset['public_id'],
-                "job_public_id": updated_job_response['public_id'],
-                "link_type": "upload"
-            })
-
-            file_link_map = {link["file_public_id"]: link for link in upload_links}
-
-
-        # STEP 7: Upload the files to Azure
-        with console.status(f"Uploading Files to Thoa", spinner="dots12"):
-            
-            # Use the actual scanned local path, not FileModel.filename from the API,
-            # because dedup may reuse an existing file row with an old filename.
-            file_map = dict(local_path_by_public_id)
-
-            md5_map = {
-                public_id: all_hashes[Path(local_path)]
-                for public_id, local_path in local_path_by_public_id.items()
-            }
-
-            for file_public_id, link in file_link_map.items():
-
-                link_id = link["public_id"]
-                filename = file_map.get(file_public_id)
-
-                updated_links = api_client.put(
-                    f"/temporary_links/{link_id}",
-                    json={
-                        "client_path": filename
-                    }
-                )
-
-            upload_all(upload_links, file_map, md5_map, max_workers=max_threads)
-
+        with console.status("Waiting for dataset to be ready", spinner="dots12"):
             while current_job_status(updated_job_response['public_id']) in UPLOAD_STATUSES:
                 time.sleep(4)
 

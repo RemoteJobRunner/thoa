@@ -130,10 +130,16 @@ def choose_hash_strategy(path, mmap_threshold_bytes=10 * 1024 * 1024):
         return path, f"ERROR: {e}"
     
 
-def hash_all(files, workers=max_threads):
+def hash_all(files, workers=max_threads, on_progress=None):
     with ThreadPoolExecutor(max_workers=workers) as executor:
-        results = executor.map(choose_hash_strategy, files)
-    return dict(results)
+        futures = {executor.submit(choose_hash_strategy, f): f for f in files}
+        results = {}
+        for future in concurrent.futures.as_completed(futures):
+            path, digest = future.result()
+            results[path] = digest
+            if on_progress:
+                on_progress()
+    return results
 
 
 def file_sizes_in_bytes(paths, follow_symlinks=True):
@@ -210,24 +216,10 @@ def upload_file_sas(local_path: Path, sas_url: str, local_md5: str, max_concurre
                 data,
                 overwrite=True,
                 max_concurrency=max_concurrency,
-                metadata={
-                    "md5": local_md5,
-                    "upload": "incomplete"
-                },
+                metadata={"md5": local_md5, "upload": "complete"},
                 validate_content=True
             )
 
-        # Retrieve existing metadata
-        props = blob_client.get_blob_properties()
-        metadata = props.metadata or {}
-
-        metadata["upload"] = "complete"
-
-        # Apply updated metadata
-        blob_client.set_blob_metadata(metadata)
-
-        # print(f"[SUCCESS] Uploaded {local_path.name} to {blob_client.blob_name}")
-        print(f"[SUCCESS] Uploaded {local_path.name} to Thoa")
     except Exception as e:
         print(f"[ERROR] Failed to upload {local_path.name}: {e}")
         raise

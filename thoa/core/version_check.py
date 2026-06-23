@@ -12,7 +12,19 @@ def current_version() -> str:
     try:
         return _pkg_version("thoa")
     except PackageNotFoundError:
-        return "0.0.0"
+        pass
+    # Dev fallback: read from pyproject.toml when running without `poetry install`
+    try:
+        import re
+        from pathlib import Path
+        pyproject = Path(__file__).parent.parent.parent / "pyproject.toml"
+        if pyproject.exists():
+            match = re.search(r'^version\s*=\s*"([^"]+)"', pyproject.read_text(), re.MULTILINE)
+            if match:
+                return match.group(1)
+    except Exception:
+        pass
+    return "0.0.0"
 
 
 def check_min_client_version(base_url: str) -> None:

@@ -28,9 +28,13 @@ class ErrorReadouts:
                 expired_hint = "\n[yellow]HINT: Run [bold]thoa login[/bold] to authenticate, or set THOA_API_KEY in your environment.[/yellow]"
             rprint(f"[bold red]401 Unauthorized: Authentication is required and has failed or has not yet been provided.[/bold red]{expired_hint}")
             
-        elif self.status_code == 400: 
+        elif self.status_code == 400:
             rprint("[bold red]400 Bad Request: The request was invalid or cannot be served.[/bold red]\n\n"
                f"[yellow]SERVER MESSAGE:\n{self.detail}[/yellow]")
+
+        elif self.status_code == 409:
+            rprint("[bold red]Error: Two or more inputs map to the same destination path.[/bold red]\n\n"
+               f"[yellow]{self.detail}[/yellow]")
 
         elif self.status_code == 500:
             rprint("[bold red]500 Internal Server Error: The server encountered an unexpected condition that prevented it from fulfilling the request.[/bold red]\n\n"

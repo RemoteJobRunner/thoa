@@ -63,8 +63,8 @@ def _patch_all(
     mock_api.post.side_effect = [
         {"public_id": _TRANSFER_ID},          # POST /data-transfers
         _manifest_resp(manifest_items),        # POST .../local/manifest
-        {},                                    # POST .../start
         {},                                    # POST .../complete (if upload needed)
+        {},                                    # POST .../start
     ]
     mock_api.get.side_effect = [
         _completed_manifest(),                 # GET .../manifest (poll)
@@ -107,7 +107,8 @@ def test_happy_path_calls_endpoints_in_order():
         "remote_ref": {"provider": "local"},
     })
     assert f"/data-transfers/{_TRANSFER_ID}/local/manifest" in str(post_calls[1])
-    assert f"/data-transfers/{_TRANSFER_ID}/start" in str(post_calls[2])
+    assert f"/data-transfers/{_TRANSFER_ID}/import/items" in str(post_calls[2])  # complete
+    assert f"/data-transfers/{_TRANSFER_ID}/start" in str(post_calls[3])
 
 
 def test_upload_skipped_when_not_required():

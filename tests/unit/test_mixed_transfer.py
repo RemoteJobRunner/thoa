@@ -142,9 +142,8 @@ def test_creates_transfer_then_posts_unified_manifest():
 
     # First POST creates the transfer
     assert post_calls[0] == call("/data-transfers", json={
-        "provider": None,
         "direction": "import",
-        "remote_ref": {"provider": None},
+        "remote_ref": {},
     })
     # Second POST hits the unified manifest endpoint
     assert f"/data-transfers/{_TRANSFER_ID}/manifest/unified" in str(post_calls[1])

@@ -44,7 +44,7 @@ from thoa.core.remote_inputs import (
     extract_google_drive_folder_id,
     track_transfer_progress,
 )
-from thoa.core.local_transfer import create_dataset, create_mixed_dataset
+from thoa.core.local_transfer import create_mixed_dataset
 from thoa.core.job_status import JobStatus, UPLOAD_STATUSES
 
 max_threads = min(32, os.cpu_count() * 2)

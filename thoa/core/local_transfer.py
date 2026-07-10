@@ -58,13 +58,11 @@ def create_mixed_dataset(specs: List[ParsedInputSpec], cwd: str) -> dict:
         all_hashes = {}
 
     has_gdrive = bool(gdrive_specs)
-    provider = None if has_gdrive else "local"
 
     with console.status("Preparing dataset transfer...", spinner="dots12") as status:
         transfer = api_client.post("/data-transfers", json={
-            "provider": provider,
             "direction": "import",
-            "remote_ref": {"provider": provider},
+            "remote_ref": {},
         })
         transfer_id = transfer["public_id"]
 

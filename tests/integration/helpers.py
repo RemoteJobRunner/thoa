@@ -29,6 +29,10 @@ def api_put(path: str, **kwargs) -> httpx.Response:
     return httpx.put(f"{api_url()}/api{path}", headers=api_headers(), timeout=30, **kwargs)
 
 
+def api_delete(path: str, **kwargs) -> httpx.Response:
+    return httpx.delete(f"{api_url()}/api{path}", headers=api_headers(), timeout=30, **kwargs)
+
+
 def create_file(filename: str = "test.txt", size: int = 100) -> str:
     resp = api_post("/files", json={
         "filename": filename,

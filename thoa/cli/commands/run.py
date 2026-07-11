@@ -42,11 +42,9 @@ from thoa.core.remote_inputs import (
     detect_input_source_kind,
     detect_remote_ref_kind,
     extract_google_drive_folder_id,
-    import_google_drive_input,
-    print_manifest_summary,
-    project_input_context,
     track_transfer_progress,
 )
+from thoa.core.local_transfer import create_mixed_dataset
 from thoa.core.job_status import JobStatus, UPLOAD_STATUSES
 
 max_threads = min(32, os.cpu_count() * 2)
@@ -211,12 +209,6 @@ def run_cmd(
             + ", ".join(spec.raw for spec in unknown_specs)
         )
         raise typer.Exit(code=1)
-    if len(remote_specs) > 1:
-        console.print("[bold red]Error:[/bold red] Multiple remote inputs are not supported yet.")
-        raise typer.Exit(code=1)
-    if remote_specs and local_specs:
-        console.print("[bold red]Error:[/bold red] Cannot combine local and remote --input values yet.")
-        raise typer.Exit(code=1)
 
     remote_input_context = None
     export_remote_ref = None
@@ -243,38 +235,20 @@ def run_cmd(
             "folder_id": export_folder_id,
         }
 
-    if remote_specs:
-        remote_spec = remote_specs[0]
-        source_kind = detect_input_source_kind(remote_spec.source)
+    for spec in remote_specs:
+        source_kind = detect_input_source_kind(spec.source)
         if source_kind == "s3":
             console.print("[bold red]Error:[/bold red] S3 inputs are not implemented yet.")
             raise typer.Exit(code=1)
         if source_kind != "google_drive":
             console.print("[bold red]Error:[/bold red] Unsupported remote --input value.")
             raise typer.Exit(code=1)
-        if input_dataset:
-            console.print(
-                "[bold red]Error:[/bold red] Cannot combine --input-dataset with remote --input."
-            )
-            raise typer.Exit(code=1)
-        if not remote_spec.mount_path:
-            console.print(
-                "[bold red]Error:[/bold red] Google Drive input requires "
-                "<gdrive_url>::<mount_path>."
-            )
-            raise typer.Exit(code=1)
 
-        imported_input = import_google_drive_input(
-            remote_spec.source,
-            retain_credential_for_export=bool(export_remote_ref),
-            defer_execution=True,
+    if remote_specs and input_dataset:
+        console.print(
+            "[bold red]Error:[/bold red] Cannot combine --input-dataset with remote --input."
         )
-        import_transfer_public_id = str(imported_input["transfer_public_id"])
-        input_root = os.path.abspath(str(remote_spec.mount_path))
-        input_dataset = None
-        remote_input_context = None
-        inputs = []
-        use_existing_input_dataset = True
+        raise typer.Exit(code=1)
 
     if export_remote_ref:
         export_payload = {
@@ -304,10 +278,9 @@ def run_cmd(
                 console.print("[bold red]Error:[/bold red] Google Drive export authorization failed.")
                 raise typer.Exit(code=1)
 
-    # Local inputs intentionally keep the old behavior in this PR.
-    inputs = [spec.source for spec in local_specs]
+    inputs = [spec.source for spec in local_specs]  # kept for dry-run compat
 
-    if input_dataset and inputs:
+    if input_dataset and parsed_inputs:
         console.print(
             "[bold red]Error:[/bold red] Cannot specify both --input and --input-dataset options at the same time. Please choose one or the other."
         )
@@ -366,9 +339,6 @@ def run_cmd(
         verbose=verbose,
     )
 
-    if import_transfer_public_id:
-        print_manifest_summary(imported_input.get("manifest"))
-    
     # STEP 0: Validate that the user has sufficient resources to run the job
     valid = validate_user_command(n_cores=n_cores, ram=ram, storage=storage)
 
@@ -532,164 +502,38 @@ def run_cmd(
 
 
     # STEP 4: Hash the file objects and create them on the server, as well as the input dataset object
-    if import_transfer_public_id:
-        # Google Drive deferred import: wait for the import transfer to
-        # finish (showing per-file progress), then briefly poll until the
-        # backend has populated job.input_context, then print the same
-        # staged-paths block the dataset branch prints.
-        import_final = track_transfer_progress(
-            import_transfer_public_id,
-            label="Importing Google Drive data",
-        )
-        if import_final.get("status") == "failed":
-            transfer_view = api_client.get(
-                f"/data-transfers/{import_transfer_public_id}"
-            )
-            console.print(
-                "[bold red]Google Drive import failed:[/bold red] "
-                f"{(transfer_view or {}).get('error_message') or 'unknown error'}"
-            )
-            raise typer.Exit(code=1)
-        console.print(
-            f"[green]Imported {import_final.get('completed_items', 0)} file(s), "
-            f"{import_final.get('completed_bytes', 0)} bytes "
-            f"(skipped {import_final.get('skipped_items', 0)})[/green]"
-        )
-
-        poll_deadline = time.time() + 30 * 60
-        job_view = None
-        with console.status("Resolving Google Drive inputs", spinner="dots12"):
-            while True:
-                results = api_client.get(
-                    f"/jobs?public_id={job_response['public_id']}"
-                    "&include_adjusted_context=True"
-                )
-                if results and results[0].get("input_context"):
-                    job_view = results[0]
-                    break
-                if time.time() > poll_deadline:
-                    console.print(
-                        "[bold red]Timed out waiting for Google Drive import.[/bold red]"
-                    )
-                    raise typer.Exit(code=1)
-                time.sleep(2)
-
-        input_ctx = job_view.get("input_context") or {}
-        adjusted = job_view.get("adjusted_input_context") or {}
-        all_known = bool(input_ctx) and all(v for v in input_ctx.values())
-        if all_known:
-            console.print(
-                "[green]Reusing previously-imported Google Drive dataset as job input.[/green]"
-            )
-            console.print(
-                "[yellow]Using existing input dataset. Files will be staged under:[/yellow]"
-            )
-        else:
-            n_new = sum(1 for v in input_ctx.values() if not v)
-            console.print(
-                f"[green]Importing {n_new} file(s) from Google Drive as job input.[/green]"
-            )
-            console.print("[yellow]Files will be staged under:[/yellow]")
-        _print_staged_paths(list(adjusted.keys()))
+    # No inputs provided at all
+    if not input_dataset and not parsed_inputs:
+        console.print("[yellow]No input files specified. Skipping input upload.[/yellow]")
         new_input_dataset = None
         names_to_public_ids = {}
 
-    else:
-        with console.status(f"Hashing File Objects", spinner="dots12"):
+    elif input_dataset:
+        console.print(f"[green]Using dataset {input_dataset} as job input.[/green]")
+        console.print("[yellow]Using existing input dataset. Files will be staged under:[/yellow]")
+        rel_paths = list(input_dataset_response.get("adjusted_context", {}).keys())
+        _print_staged_paths(rel_paths)
+        new_input_dataset = None
+        names_to_public_ids = {}
 
-            # No inputs provided at all
-            if not input_dataset and not inputs:
-                console.print("[yellow]No input files specified. Skipping input upload.[/yellow]")
-                new_input_dataset = None
-                names_to_public_ids = {}
+    elif parsed_inputs:
+        _ds = create_mixed_dataset(parsed_inputs, cwd=os.getcwd())
+        new_input_dataset = {"public_id": _ds["dataset_public_id"]}
+        names_to_public_ids = _ds["input_context"]
 
-            elif input_dataset:
-                console.print(f"[green]Using dataset {input_dataset} as job input.[/green]")
-                console.print("[yellow]Using existing input dataset. Files will be staged under:[/yellow]")
-                rel_paths = list(input_dataset_response.get("adjusted_context", {}).keys())
-                _print_staged_paths(rel_paths)
-                new_input_dataset = None
-                names_to_public_ids = {}
-
-            elif inputs:
-
-                all_files = collect_files(inputs)
-                file_sizes = file_sizes_in_bytes(all_files)
-                all_hashes = hash_all(all_files)
-                file_responses = []
-                local_path_by_public_id = {}
-
-                for path, size in file_sizes.items():
-                    response = api_client.post("/files", json={
-                        "filename": str(path),
-                        "md5sum": all_hashes[path],
-                        "size": size,
-                    })
-                    file_responses.append(response)
-                    local_path_by_public_id[response["public_id"]] = str(path)
-
-                names_to_public_ids = {f['filename']: f['public_id'] for f in file_responses}
-
-                new_input_dataset = api_client.post("/datasets", json={
-                    "files": [f['public_id'] for f in file_responses],
-                })
-
-            # Only update if we have an input dataset
-            if new_input_dataset:
-                updated_job_response = api_client.put(
-                    f"/jobs/{job_response['public_id']}",
-                    json={
-                        "input_dataset_public_id": new_input_dataset["public_id"],
-                        "input_context": names_to_public_ids
-                    }
-                )
-            
+    # Only update if we have an input dataset
     if new_input_dataset:
-        # STEP 5: Create signed azure URLs for the file objects
-        with console.status(f"Creating Upload URLs for your files", spinner="dots12"):
-            
-            while not all_files_have_upload_links(
-                updated_job_response['public_id'], 
-                new_input_dataset['public_id'],
-                [f.get("public_id") for f in file_responses]
-            ):
-                time.sleep(4)
+        with console.status("Attaching dataset to job...", spinner="dots12"):
+            updated_job_response = api_client.put(
+                f"/jobs/{job_response['public_id']}",
+                json={
+                    "input_dataset_public_id": new_input_dataset["public_id"],
+                    "input_context": names_to_public_ids
+                }
+            )
 
-            upload_links = api_client.get("/temporary_links", params={
-                "dataset_public_id": new_input_dataset['public_id'],
-                "job_public_id": updated_job_response['public_id'],
-                "link_type": "upload"
-            })
-
-            file_link_map = {link["file_public_id"]: link for link in upload_links}
-
-
-        # STEP 7: Upload the files to Azure
-        with console.status(f"Uploading Files to Thoa", spinner="dots12"):
-            
-            # Use the actual scanned local path, not FileModel.filename from the API,
-            # because dedup may reuse an existing file row with an old filename.
-            file_map = dict(local_path_by_public_id)
-
-            md5_map = {
-                public_id: all_hashes[Path(local_path)]
-                for public_id, local_path in local_path_by_public_id.items()
-            }
-
-            for file_public_id, link in file_link_map.items():
-
-                link_id = link["public_id"]
-                filename = file_map.get(file_public_id)
-
-                updated_links = api_client.put(
-                    f"/temporary_links/{link_id}",
-                    json={
-                        "client_path": filename
-                    }
-                )
-
-            upload_all(upload_links, file_map, md5_map, max_workers=max_threads)
-
+    if new_input_dataset:
+        with console.status("Waiting for dataset to be ready", spinner="dots12"):
             while current_job_status(updated_job_response['public_id']) in UPLOAD_STATUSES:
                 time.sleep(4)
 

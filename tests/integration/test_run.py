@@ -8,6 +8,7 @@ Run with: pytest tests/integration/test_run.py -v -m slow
 
 import re
 import time
+import uuid
 import pytest
 from typer.testing import CliRunner
 from thoa.cli import app
@@ -400,14 +401,17 @@ def test_reuse_existing_input_dataset(tmp_path):
 @pytest.mark.slow
 def test_dataset_download_after_job(tmp_path):
     """Submit job that produces output, then download output dataset via CLI.
-    Uses a fixed /tmp/thoa_test_output path so it works both locally and on CI."""
+    Uses a fixed /tmp/thoa_test_output path so it works both locally and on CI.
+    Output content carries a per-run uuid so the backend's (md5, size) dedup
+    cannot alias this fresh file onto a pre-existing record whose blob is absent."""
     download_dir = tmp_path / "downloads"
     download_dir.mkdir()
 
+    marker = f"hello from test {uuid.uuid4()}"
     job_id, _ = _run_job([
         "run",
         "--tools", "bash",
-        "--cmd", "mkdir -p /tmp/thoa_test_output && echo 'hello from test' > /tmp/thoa_test_output/result.txt",
+        "--cmd", f"mkdir -p /tmp/thoa_test_output && echo '{marker}' > /tmp/thoa_test_output/result.txt",
         "--output", "/tmp/thoa_test_output",
         "--download-dir", str(download_dir),
         "--n-cores", "2", "--ram", "4", "--storage", "20",

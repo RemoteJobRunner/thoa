@@ -7,7 +7,7 @@ from rich.table import Table
 from rich.panel import Panel
 from rich.console import Console
 from rich.theme import Theme
-from rich import print as rprint
+from rich import print as rprint, get_console
 from rich.spinner import Spinner
 from thoa.core import resolve_environment_spec
 from concurrent.futures import ThreadPoolExecutor
@@ -384,7 +384,8 @@ def run_cmd(
 
 
     # STEP 1: Validate the user inputs
-    with console.status(f"Starting Job Submission Workflow", spinner="dots12"):
+    submit_console = get_console()
+    with submit_console.status(f"Starting Job Submission Workflow", spinner="dots12"):
 
         script_response = api_client.post("/scripts", json={
             "name": f"{job_name} script" or "Untitled Script",
@@ -392,6 +393,9 @@ def run_cmd(
             "description": job_description or "No description provided",
             "security_status": "pending"
         })
+
+        if script_response is None:
+            raise typer.Exit(code=1)
 
         current_working_directory = str(Path.cwd())
         client_home = str(Path.home())
@@ -410,6 +414,9 @@ def run_cmd(
             "max_attempts": max_attempts,
             "disable_preflight": disable_preflight,
         })
+
+        if job_response is None:
+            raise typer.Exit(code=1)
 
         # Always set script/cwd/output metadata so backend can build run_command
         # and mount flags even when no input files are provided.
@@ -435,7 +442,7 @@ def run_cmd(
 
 
         # print(f"Job started successfully. View at: {job_response.get("public_id")}")
-        console.print(
+        submit_console.print(
             f"[bold green]Job started successfully. View at:[/bold green][bold cyan] {settings.THOA_UI_URL}/workbench/jobs/{job_response.get('public_id')}[/bold cyan]")
 
     # STEP 2: Resolve the environment and attach it to the job

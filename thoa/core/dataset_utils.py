@@ -105,6 +105,40 @@ def _required_with_headroom(total_size_bytes: int) -> int:
     headroom = max(int(total_size_bytes * 0.05), 200 * 1024 * 1024)
     return total_size_bytes + headroom
 
+def _fetch_file_size_map(dataset_id) -> dict[str, int]:
+    """Fetch {file_id: size} for every file in a dataset via GET /files."""
+    file_list = client.get(f"/files?dataset_public_id={dataset_id}") or []
+    return {
+        str(f["public_id"]): int(f.get("size") or 0)
+        for f in file_list
+        if f.get("public_id") is not None
+    }
+
+def _filtered_download_size(
+    total_size: int,
+    files: dict[str, str],
+    include: list[str] | None,
+    exclude: list[str] | None,
+    dataset_id,
+) -> int:
+    """Size to actually validate/display for the (already-filtered) file set.
+
+    Without a filter, the whole-dataset total_size is accurate. With one,
+    total_size no longer reflects what will be downloaded, so sum per-file
+    sizes for just the filtered subset, falling back to total_size if sizes
+    can't be determined.
+    """
+    if not include and not exclude:
+        return total_size
+
+    size_map = _fetch_file_size_map(dataset_id)
+    filtered_total = sum(size_map.get(str(fid), 0) for fid in files.values())
+    return filtered_total if filtered_total > 0 else total_size
+
+def _should_decrement_downloads(outcome_counts: Counter) -> bool:
+    """Only consume a download once at least one file was actually transferred."""
+    return outcome_counts.get("success", 0) > 0
+
 
 def _format_timestamp(ts: str) -> str:
     """Convert ISO timestamp to 'Mon DD YYYY, HH:MM' format."""
@@ -293,16 +327,7 @@ def download_dataset(
             dataset = datasets[0]
             downloads_remaining = dataset.get("remaining_downloads")
 
-            if downloads_remaining > 0:
-                client.put(f"/datasets/{dataset_id}/decrement_downloads")
-                console.print(
-                    Panel(
-                        f"[green]Dataset {dataset_id} has {downloads_remaining - 1} downloads remaining.[/green]",
-                        title="Download Count",
-                        style="bold green",
-                    )
-                )
-            else:
+            if not downloads_remaining or downloads_remaining <= 0:
                 console.print(
                     Panel(
                         f"[yellow]Dataset {dataset_id} has no remaining downloads.[/yellow]",
@@ -313,7 +338,6 @@ def download_dataset(
                 return
 
             total_size = int(dataset.get("total_size", 0) or 0)
-            dgb = round(total_size / 1024**3, 2)
 
             files = dataset.get("adjusted_context", {})
             if not files:
@@ -338,10 +362,13 @@ def download_dataset(
                 )
                 return
 
+            dl_size = _filtered_download_size(total_size, files, include, exclude, dataset_id)
+            dgb = round(dl_size / 1024**3, 2)
+
             target = Path(destination_path).expanduser()
             avail = _available_bytes(target)
-            required = _required_with_headroom(total_size) if total_size > 0 else None
-            if total_size > 0 and avail < required:
+            required = _required_with_headroom(dl_size) if dl_size > 0 else None
+            if dl_size > 0 and avail < required:
                 missing = required - avail
                 console.print(
                     Panel(
@@ -435,6 +462,24 @@ def download_dataset(
             console.print(
                 Panel(f"[red]{note}[/red]\n{p}", title="File failed", style="bold red")
             )
+
+    if _should_decrement_downloads(outcome_counts):
+        client.put(f"/datasets/{dataset_id}/decrement_downloads")
+        console.print(
+            Panel(
+                f"[green]Dataset {dataset_id} has {downloads_remaining - 1} downloads remaining.[/green]",
+                title="Download Count",
+                style="bold green",
+            )
+        )
+    else:
+        console.print(
+            Panel(
+                "[yellow]No download was consumed (no files were successfully transferred).[/yellow]",
+                title="Download Count",
+                style="bold yellow",
+            )
+        )
 
     console.print(
         Panel(

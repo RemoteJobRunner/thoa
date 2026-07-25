@@ -289,6 +289,30 @@ class TestFilteredDownloadSize:
 
         assert result == 5_000
 
+    def test_falls_back_to_total_size_when_one_matched_file_has_no_size(self, monkeypatch):
+        # id1 has a real size; id2's size came back null from /files. A partial
+        # sum (3 GB + 0) would under-count the true ~5 GB and let the disk
+        # check pass when there isn't actually enough space, so this must
+        # fall back to the safe upper bound (total_size), not return 3 GB.
+        fake = FakeClient(
+            dataset=None,
+            files=[
+                {"public_id": "id1", "size": 3 * 1024**3},
+                {"public_id": "id2", "size": None},
+            ],
+        )
+        monkeypatch.setattr(dataset_utils, "client", fake)
+
+        result = _filtered_download_size(
+            total_size=9 * 1024**3,
+            files={"a.bam": "id1", "b.bam": "id2"},
+            include=["*.bam"],
+            exclude=None,
+            dataset_id="ds1",
+        )
+
+        assert result == 9 * 1024**3
+
 
 class TestShouldDecrementDownloads:
 

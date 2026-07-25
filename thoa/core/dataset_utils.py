@@ -105,11 +105,15 @@ def _required_with_headroom(total_size_bytes: int) -> int:
     headroom = max(int(total_size_bytes * 0.05), 200 * 1024 * 1024)
     return total_size_bytes + headroom
 
-def _fetch_file_size_map(dataset_id) -> dict[str, int]:
-    """Fetch {file_id: size} for every file in a dataset via GET /files."""
+def _fetch_file_size_map(dataset_id) -> dict[str, int | None]:
+    """Fetch {file_id: size} for every file in a dataset via GET /files.
+
+    A missing/null size comes through as None so callers can tell "unknown"
+    apart from a genuine 0-byte file, instead of silently treating both as 0.
+    """
     file_list = client.get(f"/files?dataset_public_id={dataset_id}") or []
     return {
-        str(f["public_id"]): int(f.get("size") or 0)
+        str(f["public_id"]): (int(f["size"]) if f.get("size") is not None else None)
         for f in file_list
         if f.get("public_id") is not None
     }
@@ -123,17 +127,16 @@ def _filtered_download_size(
 ) -> int:
     """Size to actually validate/display for the (already-filtered) file set.
 
-    Without a filter, the whole-dataset total_size is accurate. With one,
-    total_size no longer reflects what will be downloaded, so sum per-file
-    sizes for just the filtered subset, falling back to total_size if sizes
-    can't be determined.
+    Without a filter, the whole-dataset total_size is accurate. With one, sum
+    per-file sizes for just the filtered subset -- but only if every matched
+    file has a known size.
     """
     if not include and not exclude:
         return total_size
 
     size_map = _fetch_file_size_map(dataset_id)
-    filtered_total = sum(size_map.get(str(fid), 0) for fid in files.values())
-    return filtered_total if filtered_total > 0 else total_size
+    sizes = [size_map.get(str(fid)) for fid in files.values()]
+    return sum(sizes) if sizes and all(sizes) else total_size
 
 def _should_decrement_downloads(outcome_counts: Counter) -> bool:
     """Only consume a download once at least one file was actually transferred."""

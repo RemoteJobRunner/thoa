@@ -71,7 +71,11 @@ def _print_env_build_failure(job_id: str) -> None:
     console.print("\n[bold red]Environment Build Failed[/bold red]")
     console.print("[red]The environment could not be validated.[/red]\n")
     try:
-        detail = api_client.get(f"/jobs/{job_id}/detail")
+        # Only environment.build_logs is read below.
+        detail = api_client.get(
+            f"/jobs/{job_id}/detail",
+            params={"include_links": False, "include_context": False},
+        )
         build_logs = (detail or {}).get("environment", {}).get("build_logs")
         if build_logs:
             console.print("[bold yellow]Environment Build Logs:[/bold yellow]")
@@ -448,7 +452,9 @@ def run_cmd(
     # STEP 2: Resolve the environment and attach it to the job
     if env_id:
         with console.status("Looking up environment", spinner="dots12"):
-            env_results = api_client.get(f"/environments?public_id={env_id}")
+            env_results = api_client.get(
+                f"/environments?public_id={env_id}", params={"include_related_jobs": False}
+            )
             if not env_results:
                 console.print(f"[bold red]Error:[/bold red] No environment found with ID [cyan]{env_id}[/cyan]. Use [bold]thoa envs list[/bold] to see your environments.")
                 return

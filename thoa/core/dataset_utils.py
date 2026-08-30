@@ -316,7 +316,10 @@ def download_dataset(
         spinner="dots12",
     ):
         try:
-            datasets = client.get(f"/datasets?public_id={dataset_id}")
+            datasets = client.get(
+                f"/datasets?public_id={dataset_id}",
+                params={"include_jobs_as_input": False, "include_jobs_as_output": False},
+            )
             
             if not datasets:
                 console.print(
@@ -622,7 +625,10 @@ def _print_tree(node: dict, prefix: str = "", level: int | None = None, depth: i
 def list_files_in_dataset(dataset_id: str, level: int | None = None):
     """List files in a dataset by its UUID, displaying hierarchy as a tree."""
     with console.status(f"[bold cyan]Fetching dataset {dataset_id}...[/bold cyan]", spinner="dots12"):
-        datasets = client.get(f"/datasets?public_id={dataset_id}")
+        datasets = client.get(
+            f"/datasets?public_id={dataset_id}",
+            params={"include_jobs_as_input": False, "include_jobs_as_output": False},
+        )
         if not datasets:
             console.print(Panel(f"[red]Dataset {dataset_id} not found.[/red]", title="Error", style="bold red"))
             return

@@ -453,7 +453,8 @@ def run_cmd(
     if env_id:
         with console.status("Looking up environment", spinner="dots12"):
             env_results = api_client.get(
-                f"/environments?public_id={env_id}", params={"include_related_jobs": False}
+                "/environments",
+                params={"public_id": env_id, "include_related_jobs": False},
             )
             if not env_results:
                 console.print(f"[bold red]Error:[/bold red] No environment found with ID [cyan]{env_id}[/cyan]. Use [bold]thoa envs list[/bold] to see your environments.")

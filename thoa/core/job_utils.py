@@ -396,7 +396,10 @@ def list_jobs(
 
 def print_job_detail(job_id: str):
     with console.status("[bold cyan]Fetching job details...[/bold cyan]", spinner="dots12"):
-        detail = api_client.get(f"/jobs/{job_id}/detail")
+        detail = api_client.get(
+            f"/jobs/{job_id}/detail",
+            params={"include_links": False, "include_context": False},
+        )
 
     if not detail:
         return

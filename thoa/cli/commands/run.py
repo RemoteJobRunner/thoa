@@ -1,7 +1,7 @@
 import typer
 from typing import Optional, List
 import pathlib
-from thoa.core.api_utils import api_client
+from thoa.core.api_utils import api_client, StreamOutcome
 
 from rich.table import Table
 from rich.panel import Panel
@@ -45,7 +45,7 @@ from thoa.core.remote_inputs import (
     track_transfer_progress,
 )
 from thoa.core.local_transfer import create_mixed_dataset
-from thoa.core.job_status import JobStatus, UPLOAD_STATUSES
+from thoa.core.job_status import JobStatus, UPLOAD_STATUSES, TERMINAL_STATUSES
 
 max_threads = min(32, os.cpu_count() * 2)
 
@@ -642,13 +642,29 @@ def run_cmd(
         result = api_client.get(f"/jobs/{job_public_id}/attempts")
         return result if isinstance(result, list) else []
 
-    def _stream_attempt(attempt: dict) -> bool:
-        """Stream logs for one attempt. Returns True on success."""
+    def _poll_attempt_outcome(attempt_public_id: str) -> StreamOutcome:
+        """Follow an attempt to its end when live logs are unavailable."""
+        with console.status("Following job status instead", spinner="dots12"):
+            while True:
+                attempt_data = api_client.get(f"/attempts/{attempt_public_id}") or {}
+                status = attempt_data.get("status")
+                if status in TERMINAL_STATUSES:
+                    return (
+                        StreamOutcome.SUCCEEDED if status == JobStatus.COMPLETED
+                        else StreamOutcome.FAILED
+                    )
+                time.sleep(4)
+
+    def _stream_attempt(attempt: dict) -> StreamOutcome:
+        """Stream logs for one attempt."""
         n = attempt['attempt_number']
         console.print(f"\n[bold]Attempt {n}[/bold]")
         # Pass job_public_id — the gateway resolves it to the latest attempt's Redis stream
-        succeeded = api_client.stream_logs_blocking(job_public_id, from_id="0-0")
-        return succeeded
+        outcome = api_client.stream_logs_blocking(job_public_id, from_id="0-0")
+        if outcome == StreamOutcome.UNAVAILABLE:
+            # The job runs on without us; its status is the only source of truth left.
+            return _poll_attempt_outcome(attempt['public_id'])
+        return outcome
 
     def _wait_for_attempt_running(attempt_public_id: str, timeout: int = 300) -> bool:
         """Poll until attempt is running (or terminal). Returns True if running/completed."""
@@ -697,10 +713,10 @@ def run_cmd(
             with console.status(f"Waiting for Attempt {n} to start", spinner="dots12"):
                 _wait_for_attempt_running(next_attempt['public_id'])
 
-        succeeded = _stream_attempt(next_attempt)
-        final_succeeded = succeeded
+        outcome = _stream_attempt(next_attempt)
+        final_succeeded = outcome == StreamOutcome.SUCCEEDED
 
-        if succeeded:
+        if final_succeeded:
             break
 
         # Failure — wait while AI is analyzing (job status == RETRYING), then check for new attempt

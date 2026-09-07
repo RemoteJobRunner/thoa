@@ -2,7 +2,7 @@ import typer
 import time
 from thoa.core.job_utils import list_jobs, current_job_status, print_job_detail
 from thoa.core.job_status import JobStatus, TERMINAL_STATUSES
-from thoa.core.api_utils import api_client
+from thoa.core.api_utils import api_client, StreamOutcome
 from rich.console import Console
 from rich.panel import Panel
 
@@ -59,7 +59,10 @@ def attach(
             console.print(f"Job [cyan]{job_id}[/cyan] ended with status [bold]{status}[/bold].")
             return
 
-    api_client.stream_logs_blocking(job_id, from_id="0-0")
+    outcome = api_client.stream_logs_blocking(job_id, from_id="0-0")
+
+    if outcome == StreamOutcome.UNAVAILABLE:
+        raise typer.Exit(code=1)
 
 
 @app.command("cancel")

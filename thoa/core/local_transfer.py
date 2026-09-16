@@ -118,9 +118,15 @@ def create_mixed_dataset(specs: List[ParsedInputSpec], cwd: str) -> dict:
             manifest_items.append(item)
 
         status.update("Building file manifest...")
+        # Listing scales with file COUNT (pagination), not file size, so
+        # this only needs headroom for folders with very many items, not
+        # large ones. Bounded well above the default so an unresponsive
+        # backend still fails cleanly instead of hanging the CLI
+        # indefinitely.
         manifest_resp = api_client.post(
             f"/data-transfers/{transfer_id}/manifest/unified",
             json={"items": manifest_items},
+            timeout=900,
         )
         if manifest_resp is None:
             raise SystemExit(1)

@@ -268,6 +268,7 @@ def track_transfer_progress(
     label: str,
     poll_interval_seconds: float = 2.0,
     show_paths: bool = True,
+    stall_timeout_seconds: float = 21_600.0,
 ) -> dict:
     """Poll a transfer's manifest until it terminates, showing a progress bar.
 
@@ -276,9 +277,29 @@ def track_transfer_progress(
     once by tracking a seen-set against the backend's ``completed_paths``
     list, so per-file lines aren't dropped when items finish in bursts.
     Returns the final manifest snapshot so the caller can render a summary.
+
+    ``stall_timeout_seconds`` is a defensive backstop, not a cap on total
+    transfer duration — a large import can legitimately run for hours as
+    long as files keep completing. The clock resets on any observed change
+    (status, skipped count, completed bytes/files) and only fires after
+    that long with *zero* movement, which is what the original hang bug
+    looked like (the backend wedged and never updated the transfer again).
+
+    The backend only reports ``completed_bytes`` once a whole file finishes,
+    not mid-stream, so a transfer with no other files alongside the one
+    currently uploading has no incremental signal for that file's entire
+    duration. Google Drive allows files up to 5TB, and this product's real
+    inputs (BAM/CRAM, large VCFs, raw sequencing reads) can run to the
+    hundreds of GB *per file* — a single such file can legitimately take
+    over an hour with zero visible progress. The default here is set high
+    enough to comfortably outlast that before treating it as stuck; pass a
+    smaller value only when the caller knows the transfer is many small
+    files (where a real stall should be caught faster).
     """
     seen: set[str] = set()
     task = None
+    last_progress_snapshot = None
+    last_progress_at = time.time()
     with Progress(
         TextColumn("[progress.description]{task.description}"),
         BarColumn(),
@@ -293,6 +314,14 @@ def track_transfer_progress(
                 silent_status_codes={404},
             )
             if not manifest:
+                if time.time() - last_progress_at > stall_timeout_seconds:
+                    progress.console.print(
+                        f"[bold red]No progress for "
+                        f"{int(stall_timeout_seconds // 60)} minutes — the transfer "
+                        f"looks stuck.[/bold red] [yellow]Transfer ID: "
+                        f"{transfer_id}[/yellow]"
+                    )
+                    raise typer.Exit(code=1)
                 time.sleep(poll_interval_seconds)
                 continue
 
@@ -300,11 +329,26 @@ def track_transfer_progress(
             skipped = manifest.get("skipped_items", 0)
             importable = max(total - skipped, 0)
             status = manifest.get("status")
+            completed_paths = manifest.get("completed_paths", [])
+
+            progress_snapshot = (
+                status, skipped, manifest.get("completed_bytes", 0), len(completed_paths),
+            )
+            if progress_snapshot != last_progress_snapshot:
+                last_progress_snapshot = progress_snapshot
+                last_progress_at = time.time()
+            elif time.time() - last_progress_at > stall_timeout_seconds:
+                progress.console.print(
+                    f"[bold red]No progress for "
+                    f"{int(stall_timeout_seconds // 60)} minutes — the transfer "
+                    f"looks stuck.[/bold red] [yellow]Transfer ID: {transfer_id}[/yellow]"
+                )
+                raise typer.Exit(code=1)
 
             if task is None:
                 task = progress.add_task(label, total=importable or 1)
 
-            for path in manifest.get("completed_paths", []):
+            for path in completed_paths:
                 if path in seen:
                     continue
                 seen.add(path)
@@ -389,7 +433,11 @@ def import_google_drive_input(
     if not auth_complete:
         raise typer.Exit(code=1)
 
-    manifest_status = api_client.post(f"/data-transfers/{transfer_id}/manifest")
+    # Listing scales with file COUNT (pagination), not file size, so this
+    # only needs headroom for folders with very many items, not large ones.
+    # Bounded well above the default so an unresponsive backend still fails
+    # cleanly instead of hanging the CLI indefinitely.
+    manifest_status = api_client.post(f"/data-transfers/{transfer_id}/manifest", timeout=900)
     if not manifest_status:
         raise typer.Exit(code=1)
 

@@ -80,7 +80,23 @@ class ApiClient:
             return
 
         api_path = f"/api{path}"
-        response = self.client.request(method, api_path, **kwargs)
+        try:
+            response = self.client.request(method, api_path, **kwargs)
+        except httpx.TimeoutException:
+            rprint(
+                f"[bold red]Request timed out:[/bold red] {method} {api_path} did not "
+                "respond in time.\n\n"
+                "[yellow]The server may be slow or unresponsive. Please try again in a "
+                "moment.[/yellow]"
+            )
+            return
+        except httpx.TransportError as exc:
+            rprint(
+                f"[bold red]Could not reach the server:[/bold red] {exc}\n\n"
+                "[yellow]Check your network connection and THOA_API_URL, then try "
+                "again.[/yellow]"
+            )
+            return
 
         if response.status_code == 200:
             if settings.THOA_API_DEBUG:

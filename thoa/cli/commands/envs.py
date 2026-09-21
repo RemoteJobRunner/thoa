@@ -64,7 +64,7 @@ def list_(
     """List your environments."""
     try:
         with console.status("[bold cyan]Fetching environments...[/bold cyan]", spinner="dots12"):
-            envs = api_client.get("/environments")
+            envs = api_client.get("/environments", params={"include_related_jobs": False})
 
         if not envs:
             console.print(Panel("[yellow]No environments found.[/yellow]", title="Environments"))

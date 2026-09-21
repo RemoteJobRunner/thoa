@@ -3,12 +3,25 @@ from typing import Optional
 from thoa.config import settings, get_api_key
 from rich import print as rprint
 import asyncio, json, websockets
+from enum import Enum
 from rich.console import Console
 from rich.text import Text
 from thoa.core.version_check import current_version
 
 
 console = Console()
+
+
+class StreamOutcome(str, Enum):
+    """What the log stream told us about an attempt.
+
+    UNAVAILABLE means the stream broke, not that the attempt failed — the job
+    keeps running on the backend, so callers must fall back to polling instead
+    of reporting a failure.
+    """
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    UNAVAILABLE = "unavailable"
 
 class ErrorReadouts: 
     def __init__(self, status_code: int, detail: Optional[str] = None):
@@ -117,12 +130,12 @@ class ApiClient:
     def close(self):
         self.client.close()
 
-    async def stream_logs(self, job_id: str, from_id: str = "$") -> bool:
+    async def stream_logs(self, job_id: str, from_id: str = "$") -> "StreamOutcome":
         """Stream logs for the current attempt of job_id.
 
-        Returns True if the attempt succeeded, False if it failed.
-        Prints lines as they arrive; the caller is responsible for
-        printing the per-attempt success/failure message.
+        Returns SUCCEEDED/FAILED when the stream reports the attempt's fate, or
+        UNAVAILABLE when it never got there. Prints lines as they arrive; the
+        caller is responsible for printing the per-attempt message.
         """
         base = self.base_url
         if base.startswith("https://"):
@@ -138,53 +151,61 @@ class ApiClient:
             "Accept": "application/json",
         }
 
-        succeeded = False
-        async with websockets.connect(
-            url,
-            additional_headers=headers,
-            ping_interval=20,
-            ping_timeout=20
-        ) as ws:
-            async for raw in ws:
-                try:
-                    msg = json.loads(raw)
-                except Exception:
-                    console.print(raw)
-                    continue
+        outcome = StreamOutcome.UNAVAILABLE
+        try:
+            async with websockets.connect(
+                url,
+                additional_headers=headers,
+                ping_interval=20,
+                ping_timeout=20
+            ) as ws:
+                async for raw in ws:
+                    try:
+                        msg = json.loads(raw)
+                    except Exception:
+                        console.print(raw)
+                        continue
 
-                if msg.get("event") == "keepalive":
-                    continue
+                    if msg.get("event") == "keepalive":
+                        continue
 
-                if msg.get("event") == "connected":
-                    continue
+                    if msg.get("event") == "connected":
+                        continue
 
-                if msg.get("event") == "cancelled":
-                    console.print("[bold red]Job was cancelled.[/bold red]")
-                    await ws.close()
-                    break
+                    if msg.get("event") == "cancelled":
+                        console.print("[bold red]Job was cancelled.[/bold red]")
+                        outcome = StreamOutcome.FAILED
+                        await ws.close()
+                        break
 
-                if msg.get("event") == "error":
-                    console.print(f"[red]error:[/red] {msg.get('message')}")
-                    break
+                    if msg.get("event") == "error":
+                        console.print(f"[red]error:[/red] {msg.get('message')}")
+                        break
 
-                if msg.get("event") == "done":
-                    succeeded = msg.get("success") == 1
-                    await ws.close()
-                    break
+                    if msg.get("event") == "done":
+                        outcome = (
+                            StreamOutcome.SUCCEEDED if msg.get("success") == 1
+                            else StreamOutcome.FAILED
+                        )
+                        await ws.close()
+                        break
 
-                # Standard log entries
-                stream = msg.get("stream")
-                data = msg.get("data", "")
+                    # Standard log entries
+                    stream = msg.get("stream")
+                    data = msg.get("data", "")
 
-                if stream == "stderr":
-                    console.print(f"[orange3][remote stderr][/orange3] {data}", end="")
-                else:
-                    console.print(f"[blue][remote stdout][/blue] {data}", end="")
+                    if stream == "stderr":
+                        console.print(f"[orange3][remote stderr][/orange3] {data}", end="")
+                    else:
+                        console.print(f"[blue][remote stdout][/blue] {data}", end="")
+        except (OSError, websockets.exceptions.WebSocketException) as e:
+            console.print(f"[yellow]Live log stream unavailable:[/yellow] {e}")
+            return StreamOutcome.UNAVAILABLE
 
-        return succeeded
+        return outcome
 
-    def stream_logs_blocking(self, job_id: str, from_id: str = "0-0") -> bool:
-        """Convenience wrapper for sync CLIs. Returns True on success."""
+    def stream_logs_blocking(self, job_id: str, from_id: str = "0-0") -> "StreamOutcome":
+        """Convenience wrapper for sync CLIs."""
         return asyncio.run(self.stream_logs(job_id, from_id))
 
 api_client = ApiClient(

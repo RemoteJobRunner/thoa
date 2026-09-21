@@ -6,6 +6,7 @@ These do NOT require a live backend - they test CLI argument validation.
 from unittest.mock import patch, MagicMock
 from typer.testing import CliRunner
 from thoa.cli import app
+from thoa.core.api_utils import StreamOutcome
 
 runner = CliRunner()
 
@@ -224,6 +225,22 @@ def test_attach_provisioning_job_waits_then_streams():
         "stream_logs_blocking should be called exactly once"
     assert mock_time.sleep.call_count >= 1, \
         "time.sleep should be called at least once while waiting"
+
+
+def test_attach_exits_nonzero_when_stream_unavailable():
+    # The stream is the whole point of attach: if it never opened, say so.
+    mock_api = MagicMock()
+    mock_api.get.return_value = [{"status": "running", "name": "test-job"}]
+    mock_api.stream_logs_blocking.return_value = StreamOutcome.UNAVAILABLE
+
+    with patch("thoa.core.job_utils.api_client", mock_api), \
+         patch("thoa.core.api_utils.api_client", mock_api), \
+         patch("thoa.cli.commands.jobs.api_client", mock_api):
+
+        result = runner.invoke(app, ["jobs", "attach", "abc-123-def"])
+
+    assert result.exit_code == 1, \
+        f"Expected exit_code 1, got {result.exit_code}. Output: {result.output}"
 
 
 def test_cancel_job_success():

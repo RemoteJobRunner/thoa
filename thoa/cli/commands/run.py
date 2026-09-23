@@ -531,7 +531,14 @@ def run_cmd(
         names_to_public_ids = {}
 
     elif parsed_inputs:
-        _ds = create_mixed_dataset(parsed_inputs, cwd=os.getcwd())
+        try:
+            _ds = create_mixed_dataset(parsed_inputs, cwd=os.getcwd())
+        except BaseException:
+            # Input prep failed after the job (and its flow, which is now
+            # waiting on this input dataset) was already created. Cancel it
+            # rather than leaving the flow waiting forever.
+            api_client.post(f"/jobs/{job_response['public_id']}/cancel", silent_status_codes={400})
+            raise
         new_input_dataset = {"public_id": _ds["dataset_public_id"]}
         names_to_public_ids = _ds["input_context"]
 

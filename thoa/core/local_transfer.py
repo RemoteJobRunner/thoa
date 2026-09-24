@@ -15,7 +15,30 @@ from thoa.core.job_utils import (
 )
 
 
-def create_mixed_dataset(specs: List[ParsedInputSpec], cwd: str) -> dict:
+# Must match DISK_BUFFER_GB in the backend's job_submission_flow disk check.
+DISK_BUFFER_GB = 1
+DISK_WARN_FRACTION = 0.75
+
+
+def check_dataset_fits_disk(total_bytes: int, storage_gb: int) -> None:
+    """Exit if the dataset leaves under DISK_BUFFER_GB of headroom; warn above DISK_WARN_FRACTION."""
+    disk_bytes = storage_gb * (1024 ** 3)
+    size_gb = total_bytes / (1024 ** 3)
+    if total_bytes + DISK_BUFFER_GB * (1024 ** 3) > disk_bytes:
+        console.print(
+            f"[bold red]Error:[/bold red] Input data ({size_gb:.1f} GB) leaves less than "
+            f"{DISK_BUFFER_GB} GB of headroom on the requested disk space ({storage_gb} GB). "
+            f"Re-run with --storage {int(size_gb) + DISK_BUFFER_GB + 1} or larger."
+        )
+        raise SystemExit(1)
+    if total_bytes > DISK_WARN_FRACTION * disk_bytes:
+        console.print(
+            f"[yellow]Warning: you requested a {storage_gb} GB disk and your input data is "
+            f"{size_gb:.1f} GB. The disk may fill up during the job; consider a larger --storage.[/yellow]"
+        )
+
+
+def create_mixed_dataset(specs: List[ParsedInputSpec], cwd: str, storage_gb: int | None = None) -> dict:
     """Upload a mixed set of local and Google Drive inputs as a single dataset.
 
     Handles arbitrary combinations of local files/directories and GDrive URLs,
@@ -124,6 +147,11 @@ def create_mixed_dataset(specs: List[ParsedInputSpec], cwd: str) -> dict:
         )
         if manifest_resp is None:
             raise SystemExit(1)
+
+    # Fail before any bytes move if the dataset can't fit; the backend would reject
+    # the job anyway, but only after the whole import has finished.
+    if storage_gb is not None:
+        check_dataset_fits_disk(manifest_resp.get("total_bytes") or 0, storage_gb)
 
     # Check for mount path conflicts (server returns 409 on conflict)
     items = manifest_resp.get("items", [])

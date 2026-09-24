@@ -221,9 +221,9 @@ class FakeClient:
         self.put_calls = []
         self.post_calls = []
 
-    def get(self, path, **kwargs):
+    def get(self, path, params=None, **kwargs):
         self.get_calls.append(path)
-        if path.startswith("/datasets?public_id="):
+        if path == "/datasets" and (params or {}).get("public_id"):
             return [self.dataset]
         if path.startswith("/files?dataset_public_id="):
             return self.files

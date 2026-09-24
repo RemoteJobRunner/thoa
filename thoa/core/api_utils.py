@@ -39,7 +39,8 @@ class ErrorReadouts:
                 expired_hint = f"\n[yellow]{self.detail}[/yellow]"
             else:
                 expired_hint = "\n[yellow]HINT: Run [bold]thoa login[/bold] to authenticate, or set THOA_API_KEY in your environment.[/yellow]"
-            rprint(f"[bold red]401 Unauthorized: Authentication is required and has failed or has not yet been provided.[/bold red]{expired_hint}")
+            support_url = f"{settings.THOA_UI_URL}/support/cli-issues/login-still-unauthorized"
+            rprint(f"[bold red]401 Unauthorized: Authentication is required and has failed or has not yet been provided.[/bold red]{expired_hint}\n[yellow]More help: {support_url}[/yellow]")
             
         elif self.status_code == 400:
             rprint("[bold red]400 Bad Request: The request was invalid or cannot be served.[/bold red]\n\n"

@@ -532,7 +532,7 @@ def run_cmd(
 
     elif parsed_inputs:
         try:
-            _ds = create_mixed_dataset(parsed_inputs, cwd=os.getcwd())
+            _ds = create_mixed_dataset(parsed_inputs, cwd=os.getcwd(), job_public_id=job_response['public_id'])
         except BaseException:
             # Input prep failed after the job (and its flow, which is now
             # waiting on this input dataset) was already created. Cancel it

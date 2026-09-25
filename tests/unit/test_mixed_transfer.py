@@ -144,6 +144,7 @@ def test_creates_transfer_then_posts_unified_manifest():
     assert post_calls[0] == call("/data-transfers", json={
         "direction": "import",
         "remote_ref": {},
+        "job_public_id": None,
     })
     # Second POST hits the unified manifest endpoint
     assert f"/data-transfers/{_TRANSFER_ID}/manifest/unified" in str(post_calls[1])
@@ -278,7 +279,7 @@ def test_local_skipped_message_not_uploaded(capsys):
     assert start_call is not None
 
 
-def test_failed_transfer_raises_runtime_error():
+def test_failed_transfer_exits_with_error():
     specs = [_local_spec(), _gdrive_spec()]
     patches, mock_api = _patch_all(
         specs=specs,
@@ -290,7 +291,7 @@ def test_failed_transfer_raises_runtime_error():
     ]
 
     with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7], patches[8]:
-        with pytest.raises(RuntimeError, match="Dataset import failed"):
+        with pytest.raises(SystemExit):
             lt.create_mixed_dataset(specs, cwd="/home/user")
 
 

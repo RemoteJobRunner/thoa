@@ -1,6 +1,6 @@
 import os
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 from rich.progress import BarColumn, MofNCompleteColumn, Progress, TextColumn
 
@@ -15,7 +15,7 @@ from thoa.core.job_utils import (
 )
 
 
-def create_mixed_dataset(specs: List[ParsedInputSpec], cwd: str) -> dict:
+def create_mixed_dataset(specs: List[ParsedInputSpec], cwd: str, job_public_id: Optional[str] = None) -> dict:
     """Upload a mixed set of local and Google Drive inputs as a single dataset.
 
     Handles arbitrary combinations of local files/directories and GDrive URLs,
@@ -62,6 +62,8 @@ def create_mixed_dataset(specs: List[ParsedInputSpec], cwd: str) -> dict:
         transfer = api_client.post("/data-transfers", json={
             "direction": "import",
             "remote_ref": {},
+            # Lets the backend cancel the job if the import fails, even if this CLI is gone.
+            "job_public_id": job_public_id,
         })
         transfer_id = transfer["public_id"]
 
@@ -169,7 +171,8 @@ def create_mixed_dataset(specs: List[ParsedInputSpec], cwd: str) -> dict:
     if final.get("status") == "failed":
         transfer_view = api_client.get(f"/data-transfers/{transfer_id}")
         error = (transfer_view or {}).get("error_message") or "unknown error"
-        raise RuntimeError(f"Dataset import failed: {error}")
+        console.print(f"[bold red]Dataset import failed:[/bold red] {error}")
+        raise SystemExit(1)
 
     resolved = api_client.get(f"/data-transfers/{transfer_id}/resolved-context")
 

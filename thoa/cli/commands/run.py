@@ -36,15 +36,22 @@ from thoa.core.job_utils import (
     max_threads,
     console
 )
-from thoa.core.input_specs import parse_input_spec
+from thoa.core.input_specs import InputSpecError, parse_input_spec
 from thoa.core.remote_inputs import (
     authorize_google_drive_transfer,
     detect_input_source_kind,
     detect_remote_ref_kind,
     extract_google_drive_folder_id,
     track_transfer_progress,
+    PUBLIC_PROVIDERS,
 )
-from thoa.core.local_transfer import create_mixed_dataset
+from thoa.core.local_transfer import (
+    create_mixed_dataset,
+    prepare_mixed_transfer,
+    start_transfer,
+    track_transfer,
+    upload_local_items,
+)
 from thoa.core.job_status import JobStatus, UPLOAD_STATUSES, TERMINAL_STATUSES
 
 max_threads = min(32, os.cpu_count() * 2)
@@ -202,9 +209,16 @@ def run_cmd(
     # - local --input remains unchanged
     # - Google Drive input moves from --input-source to --input <url>::<mount_path>
     # - dataset ids intentionally stay on --input-dataset
-    parsed_inputs = [parse_input_spec(raw) for raw in (inputs or [])]
+    try:
+        parsed_inputs = [parse_input_spec(raw) for raw in (inputs or [])]
+    except InputSpecError as exc:
+        console.print(f"[bold red]Error:[/bold red] {exc}")
+        raise typer.Exit(code=1)
     local_specs = [spec for spec in parsed_inputs if spec.kind == "local"]
     remote_specs = [spec for spec in parsed_inputs if spec.kind == "google_drive"]
+    # Public accessions (SRR…, PRJNA…, GCF_…) are fetched server-side: the job
+    # waits on the import instead of the CLI having to stay open for it.
+    public_specs = [spec for spec in parsed_inputs if spec.kind in PUBLIC_PROVIDERS]
     unknown_specs = [spec for spec in parsed_inputs if spec.kind == "unknown"]
 
     if unknown_specs:
@@ -248,7 +262,7 @@ def run_cmd(
             console.print("[bold red]Error:[/bold red] Unsupported remote --input value.")
             raise typer.Exit(code=1)
 
-    if remote_specs and input_dataset:
+    if (remote_specs or public_specs) and input_dataset:
         console.print(
             "[bold red]Error:[/bold red] Cannot combine --input-dataset with remote --input."
         )
@@ -326,7 +340,7 @@ def run_cmd(
         pass
 
     print_config(
-        inputs=inputs,
+        inputs=inputs + [f"{spec.source} ({spec.kind})" for spec in public_specs],
         input_dataset=input_dataset,
         output=output,
         n_cores=n_cores,
@@ -376,6 +390,11 @@ def run_cmd(
             "/azure_prices/estimate",
             params={"n_cores": n_cores, "ram": ram, "limit": 10}
         )
+        if public_specs:
+            console.print(
+                "[yellow]Public accessions are resolved when the job is submitted; "
+                "their files are not included in the size below.[/yellow]"
+            )
 
         _print_dry_run_summary(
             n_files=n_files,
@@ -386,6 +405,12 @@ def run_cmd(
         )
         raise typer.Exit(code=0)
 
+
+    # Resolve accessions and build the manifest before any job exists, so bad
+    # accessions, path collisions and quota problems fail without leaving a job.
+    prepared = None
+    if public_specs:
+        prepared = prepare_mixed_transfer(parsed_inputs, cwd=os.getcwd())
 
     # STEP 1: Validate the user inputs
     submit_console = get_console()
@@ -412,6 +437,7 @@ def run_cmd(
             "client_home": client_home,
             "use_existing_input_dataset": use_existing_input_dataset,
             "import_transfer_public_id": import_transfer_public_id,
+            "pending_import_transfer_public_id": prepared.transfer_id if prepared else None,
             "export_transfer_public_id": export_transfer_public_id,
             "input_mount_root": input_root,
             "strict": strict,
@@ -530,6 +556,48 @@ def run_cmd(
         new_input_dataset = None
         names_to_public_ids = {}
 
+    elif prepared is not None:
+        job_public_id = job_response['public_id']
+        try:
+            upload_local_items(prepared)
+            start_transfer(prepared)
+        except BaseException:
+            # Local uploads need this CLI; the job can't start without them.
+            api_client.post(f"/jobs/{job_public_id}/cancel", silent_status_codes={400})
+            raise
+
+        if run_async:
+            console.print(Panel(
+                f"[bold green]Job submitted successfully![/bold green]\n\n"
+                f"The data import runs server-side; the job starts as soon as it finishes.\n\n"
+                f"[label]Job ID:[/label]    [value]{job_public_id}[/value]\n"
+                f"[label]View:[/label]      [value]{settings.THOA_UI_URL}/workbench/jobs/{job_public_id}[/value]\n"
+                f"[label]Attach:[/label]    [value]thoa jobs attach {job_public_id}[/value]\n"
+                f"[label]Cancel:[/label]    [value]thoa jobs cancel {job_public_id}[/value]",
+                title="[title]Job Submitted (async)[/title]",
+                expand=False,
+                border_style="green"
+            ))
+            return
+
+        try:
+            _ds = track_transfer(prepared)
+        except KeyboardInterrupt:
+            # The import (and then the job) carries on without us.
+            console.print(
+                "\n[yellow]Detached. The import keeps running server-side and the job starts "
+                "when the data is ready.[/yellow]\n"
+                f"  Follow: [bold]thoa jobs attach {job_public_id}[/bold]\n"
+                f"  Cancel: [bold]thoa jobs cancel {job_public_id}[/bold]"
+            )
+            return
+        except RuntimeError as exc:
+            # The backend already failed the job along with its import.
+            console.print(f"[bold red]{exc}[/bold red]")
+            raise typer.Exit(code=1)
+        new_input_dataset = {"public_id": _ds["dataset_public_id"]}
+        names_to_public_ids = _ds["input_context"]
+
     elif parsed_inputs:
         try:
             _ds = create_mixed_dataset(parsed_inputs, cwd=os.getcwd())
@@ -542,8 +610,8 @@ def run_cmd(
         new_input_dataset = {"public_id": _ds["dataset_public_id"]}
         names_to_public_ids = _ds["input_context"]
 
-    # Only update if we have an input dataset
-    if new_input_dataset:
+    # Only update if we have an input dataset (the backend attaches imports it ran itself)
+    if new_input_dataset and prepared is None:
         with console.status("Attaching dataset to job...", spinner="dots12"):
             updated_job_response = api_client.put(
                 f"/jobs/{job_response['public_id']}",

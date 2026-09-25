@@ -356,3 +356,78 @@ def test_no_gdrive_specs_sends_base_dir_not_mount_path():
     gdrive_item = next(i for i in body["items"] if i.get("provider") == "google_drive")
     assert gdrive_item.get("base_dir") == "/home/user"
     assert "mount_path" not in gdrive_item
+
+
+# ---------------------------------------------------------------------------
+# public accessions
+# ---------------------------------------------------------------------------
+
+def _public_spec(accession="SRR390728", kind="sra", mount_path=None):
+    return SimpleNamespace(source=accession, kind=kind, mount_path=mount_path)
+
+
+def _public_manifest_item(path="SRR390728_1.fastq.gz", size=101304405):
+    return {
+        "provider": "sra",
+        "path": path,
+        "upload_required": True,
+        "file_public_id": f"file-{path}",
+        "item_public_id": f"item-{path}",
+        "mount_path": f"/home/user/{path}",
+        "size": size,
+    }
+
+
+def _public_manifest_payload(specs, cwd="/home/user", manifest_items=None):
+    patches, mock_api = _patch_all(
+        specs=specs, files=[], sizes={}, hashes={},
+        manifest_items=manifest_items or [_public_manifest_item()],
+    )
+    auth_mock = MagicMock()
+    patches[5] = patch("thoa.core.remote_inputs.authorize_google_drive_transfer", auth_mock)
+    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7], patches[8]:
+        prepared = lt.prepare_mixed_transfer(specs, cwd=cwd)
+    manifest_call = next(c for c in mock_api.post.call_args_list if "manifest/unified" in str(c))
+    return prepared, manifest_call.kwargs["json"]["items"], auth_mock
+
+
+def test_public_accession_is_sent_as_source_ref_with_base_dir():
+    _, items, auth_mock = _public_manifest_payload([_public_spec()])
+    assert items == [{"provider": "sra", "source_ref": {"accession": "SRR390728"}, "base_dir": "/home/user"}]
+    auth_mock.assert_not_called()  # public data needs no Google (or any) authorization
+
+
+def test_public_mount_path_is_resolved_against_cwd():
+    _, items, _ = _public_manifest_payload([_public_spec("PRJNA1", mount_path="reads/")])
+    assert items[0]["mount_path"] == "/home/user/reads"
+
+
+def test_assembly_accession_uses_its_own_provider():
+    _, items, _ = _public_manifest_payload([_public_spec("GCF_000005845.2", kind="ncbi_assembly")])
+    assert items[0]["provider"] == "ncbi_assembly"
+
+
+def test_prepare_does_not_upload_or_start():
+    prepared, _, _ = _public_manifest_payload([_public_spec()])
+    assert prepared.transfer_id == _TRANSFER_ID
+    assert prepared.has_public_items is True
+
+
+def test_prepare_prints_resolved_size(capsys):
+    _public_manifest_payload(
+        [_public_spec()],
+        manifest_items=[_public_manifest_item(), _public_manifest_item("SRR390728_2.fastq.gz", 101858469)],
+    )
+    out = capsys.readouterr().out
+    assert "Resolved 1 public accession(s)" in out and "2 file(s)" in out and "193.8 MB" in out
+
+
+def test_track_uses_byte_progress_for_public_imports():
+    prepared = lt.PreparedTransfer(transfer_id=_TRANSFER_ID, manifest={"items": [_public_manifest_item()]})
+    mock_api = MagicMock()
+    mock_api.get.side_effect = [_resolved_context()]
+    track = MagicMock(return_value={"status": "completed"})
+    with patch.object(lt, "api_client", mock_api), patch("thoa.core.remote_inputs.track_transfer_progress", track):
+        result = lt.track_transfer(prepared)
+    assert track.call_args.kwargs["by_bytes"] is True
+    assert result["dataset_public_id"] == _DATASET_ID

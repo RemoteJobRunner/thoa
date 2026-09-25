@@ -1,5 +1,6 @@
 import os
 import queue
+import re
 import sys
 import threading
 import time
@@ -10,15 +11,44 @@ from urllib.parse import parse_qs, urlparse
 import typer
 from rich.progress import (
     BarColumn,
+    DownloadColumn,
     MofNCompleteColumn,
     Progress,
     TextColumn,
     TimeRemainingColumn,
+    TransferSpeedColumn,
 )
 
 from thoa.config import settings
 from thoa.core.api_utils import api_client
 from thoa.core.job_utils import console
+
+# Public-data providers, keyed by the backend provider name. The patterns only
+# route inputs to a provider; the backend re-validates every accession.
+PUBLIC_ACCESSION_PATTERNS = {
+    # INSDC reads (SRA/ENA/DDBJ): run, experiment, sample, study, BioProject, BioSample
+    "sra": re.compile(r"[SED]R[RXSP]\d{6,}|PRJ(?:NA|EB|DB)\d+|SAM(?:N|EA|D)\d+"),
+    # NCBI genome assemblies
+    "ncbi_assembly": re.compile(r"GC[AF]_\d{9}(?:\.\d+)?"),
+}
+PUBLIC_PROVIDERS = frozenset(PUBLIC_ACCESSION_PATTERNS)
+# Optional prefixes that force accession parsing, e.g. sra:SRR390728.
+PUBLIC_PREFIXES = {"sra": "sra", "assembly": "ncbi_assembly"}
+
+
+def parse_public_accession(value: str | None) -> tuple[str, str, bool] | None:
+    """Return (provider, ACCESSION, prefixed) for a public accession, else None."""
+    if not value:
+        return None
+    value = str(value).strip()
+    prefix, sep, rest = value.partition(":")
+    if sep and prefix.lower() in PUBLIC_PREFIXES:
+        return PUBLIC_PREFIXES[prefix.lower()], rest.strip().upper(), True
+    candidate = value.upper()
+    for provider, pattern in PUBLIC_ACCESSION_PATTERNS.items():
+        if pattern.fullmatch(candidate):
+            return provider, candidate, False
+    return None
 
 
 def detect_input_source_kind(value: str | None) -> str:
@@ -29,6 +59,9 @@ def detect_input_source_kind(value: str | None) -> str:
         return "google_drive"
     if value.startswith("s3://"):
         return "s3"
+    public = parse_public_accession(value)
+    if public:
+        return public[0]
     return "unknown"
 
 
@@ -268,6 +301,7 @@ def track_transfer_progress(
     label: str,
     poll_interval_seconds: float = 2.0,
     show_paths: bool = True,
+    by_bytes: bool = False,
 ) -> dict:
     """Poll a transfer's manifest until it terminates, showing a progress bar.
 
@@ -276,7 +310,13 @@ def track_transfer_progress(
     once by tracking a seen-set against the backend's ``completed_paths``
     list, so per-file lines aren't dropped when items finish in bursts.
     Returns the final manifest snapshot so the caller can render a summary.
+
+    by_bytes shows bytes and speed instead of a file count; a public import of
+    a few huge files would otherwise sit at 0/N for hours.
     """
+    if by_bytes:
+        return _track_transfer_bytes(transfer_id, label=label, poll_interval_seconds=poll_interval_seconds)
+
     seen: set[str] = set()
     task = None
     with Progress(
@@ -314,9 +354,50 @@ def track_transfer_progress(
                     )
             progress.update(task, completed=min(len(seen), importable or len(seen)))
 
-            if status in ("completed", "failed"):
+            if status in ("completed", "failed", "cancelled"):
                 if status == "completed" and importable:
                     progress.update(task, completed=importable)
+                return manifest
+
+            time.sleep(poll_interval_seconds)
+
+
+def _track_transfer_bytes(transfer_id: str, *, label: str, poll_interval_seconds: float) -> dict:
+    seen: set[str] = set()
+    task = None
+    with Progress(
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        DownloadColumn(),
+        TextColumn("•"),
+        TransferSpeedColumn(),
+        TextColumn("•"),
+        TimeRemainingColumn(),
+        console=console,
+    ) as progress:
+        while True:
+            manifest = api_client.get(
+                f"/data-transfers/{transfer_id}/manifest",
+                silent_status_codes={404},
+            )
+            if not manifest:
+                time.sleep(poll_interval_seconds)
+                continue
+
+            total = manifest.get("total_bytes") or 0
+            done = (manifest.get("completed_bytes") or 0) + (manifest.get("in_progress_bytes") or 0)
+            if task is None:
+                task = progress.add_task(label, total=total or None)
+
+            for path in manifest.get("completed_paths", []):
+                if path not in seen:
+                    seen.add(path)
+                    progress.console.log(f"[{len(seen)}/{manifest.get('total_items', len(seen))}] {path}")
+            progress.update(task, completed=min(done, total) if total else done)
+
+            if manifest.get("status") in ("completed", "failed", "cancelled"):
+                if manifest.get("status") == "completed" and total:
+                    progress.update(task, completed=total)
                 return manifest
 
             time.sleep(poll_interval_seconds)

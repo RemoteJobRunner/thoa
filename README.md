@@ -26,6 +26,21 @@ thoa run \
   --output ./results
 ```
 
+### Public data
+
+Pass public accessions straight to `--input`; THOA fetches them server-side, so nothing is downloaded to your machine:
+
+```bash
+thoa run -i SRR390728 --tools seqkit --cmd "seqkit stats *.fastq.gz"   # FASTQ for one run
+thoa run -i PRJNA172563::reads/ ...                                     # every run of a project, into ./reads/
+thoa run -i GCF_000001405.40 ...                                        # GRCh38 FASTA + GTF + GFF
+```
+
+- **Reads** (SRA/ENA/DDBJ): run, experiment, sample, study, BioProject or BioSample accessions (`SRR…`, `SRX…`, `SRS…`, `SAMN…`, `SRP…`, `PRJNA…`, `PRJEB…`), fetched as FASTQ.gz from ENA. A run lands in the current directory; other accessions land in `./<accession>/`.
+- **Genomes**: NCBI assembly accessions (`GCF_…`, `GCA_…`; without a version you get the latest): `*_genomic.fna.gz`, `.gtf.gz`, `.gff.gz`.
+- `::path` puts the files somewhere else. If a local file or directory has the same name as an accession, use `./NAME` for the local path or `sra:NAME` / `assembly:NAME` for the accession.
+- Large imports keep running if you close the terminal: press Ctrl-C to detach, `thoa jobs attach <id>` to follow, `thoa jobs cancel <id>` to stop. Files already in your storage are not fetched again.
+
 ## Commands
 
 | Command | Description |

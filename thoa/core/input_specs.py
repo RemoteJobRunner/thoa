@@ -34,8 +34,11 @@ def parse_input_spec(raw: str) -> ParsedInputSpec:
     if public:
         provider, accession, prefixed = public
         if not prefixed and Path(source).expanduser().exists():
-            label = "an SRA accession" if provider == "sra" else "an NCBI assembly accession"
-            prefix = "sra" if provider == "sra" else "assembly"
+            label, prefix = {
+                "sra": ("an SRA accession", "sra"),
+                "ncbi_assembly": ("an NCBI assembly accession", "assembly"),
+                "geo": ("a GEO series accession", "geo"),
+            }[provider]
             raise InputSpecError(
                 f"'{source}' is both a local path and {label}. "
                 f"Use './{source}' for the local path or '{prefix}:{source}' for the accession."

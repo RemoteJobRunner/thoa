@@ -71,3 +71,17 @@ def test_prefix_picks_the_accession_even_with_a_local_path(tmp_path, monkeypatch
     (tmp_path / "SRR390728").mkdir()
     spec = parse_input_spec("sra:SRR390728::reads")
     assert (spec.kind, spec.source, spec.mount_path) == ("sra", "SRR390728", "reads")
+
+
+def test_geo_series_is_detected():
+    assert parse_public_accession("GSE348257") == ("geo", "GSE348257", False)
+    assert parse_public_accession("geo:gse52778") == ("geo", "GSE52778", True)
+    assert parse_public_accession("GSM10069137") is None  # samples aren't supported (yet)
+
+
+def test_geo_ambiguity_suggests_geo_prefix(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "GSE348257").mkdir()
+    with pytest.raises(InputSpecError) as exc:
+        parse_input_spec("GSE348257")
+    assert "geo:GSE348257" in str(exc.value)

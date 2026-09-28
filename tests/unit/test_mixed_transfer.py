@@ -431,3 +431,14 @@ def test_track_uses_byte_progress_for_public_imports():
         result = lt.track_transfer(prepared)
     assert track.call_args.kwargs["by_bytes"] is True
     assert result["dataset_public_id"] == _DATASET_ID
+
+
+def test_provider_notes_are_printed(capsys):
+    patches, mock_api = _patch_all(specs=[_public_spec("GSE348257", kind="geo")], files=[], sizes={}, hashes={})
+    mock_api.post.side_effect = [
+        {"public_id": _TRANSFER_ID},
+        {"items": [], "notes": ["Raw reads for GSE348257 (PRJNA1533317) are not available at ENA yet"]},
+    ]
+    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7], patches[8]:
+        lt.prepare_mixed_transfer([_public_spec("GSE348257", kind="geo")], cwd="/home/user")
+    assert "not available at ENA yet" in capsys.readouterr().out

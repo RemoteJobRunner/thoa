@@ -176,6 +176,8 @@ def prepare_mixed_transfer(specs: List[ParsedInputSpec], cwd: str) -> PreparedTr
             f"[green]Resolved {len(public_specs)} public accession(s):[/green] "
             f"{len(public_items)} file(s), {_format_bytes(public_bytes)}"
         )
+    for note in manifest_resp.get("notes") or []:
+        console.print(f"  [yellow]Note:[/yellow] {note}")
     if n_local_skipped:
         console.print(f"  [dim]{n_local_skipped} local file(s) already uploaded, skipping.[/dim]")
     if n_remote_skipped:

@@ -30,10 +30,12 @@ PUBLIC_ACCESSION_PATTERNS = {
     "sra": re.compile(r"[SED]R[RXSP]\d{6,}|PRJ(?:NA|EB|DB)\d+|SAM(?:N|EA|D)\d+"),
     # NCBI genome assemblies
     "ncbi_assembly": re.compile(r"GC[AF]_\d{9}(?:\.\d+)?"),
+    # GEO series: supplementary files plus the linked raw reads (when ENA has them)
+    "geo": re.compile(r"GSE\d+"),
 }
 PUBLIC_PROVIDERS = frozenset(PUBLIC_ACCESSION_PATTERNS)
 # Optional prefixes that force accession parsing, e.g. sra:SRR390728.
-PUBLIC_PREFIXES = {"sra": "sra", "assembly": "ncbi_assembly"}
+PUBLIC_PREFIXES = {"sra": "sra", "assembly": "ncbi_assembly", "geo": "geo"}
 
 
 def parse_public_accession(value: str | None) -> tuple[str, str, bool] | None:

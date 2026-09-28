@@ -38,7 +38,8 @@ thoa run -i GCF_000001405.40 ...                                        # GRCh38
 
 - **Reads** (SRA/ENA/DDBJ): run, experiment, sample, study, BioProject or BioSample accessions (`SRR…`, `SRX…`, `SRS…`, `SAMN…`, `SRP…`, `PRJNA…`, `PRJEB…`), fetched as FASTQ.gz from ENA. A run lands in the current directory; other accessions land in `./<accession>/`.
 - **Genomes**: NCBI assembly accessions (`GCF_…`, `GCA_…`; without a version you get the latest): `*_genomic.fna.gz`, `.gtf.gz`, `.gff.gz`.
-- `::path` puts the files somewhere else. If a local file or directory has the same name as an accession, use `./NAME` for the local path or `sra:NAME` / `assembly:NAME` for the accession.
+- **GEO series** (`GSE…`): GEO's processed supplementary files into `./GSE…/suppl/`, plus the series' raw reads as FASTQ into `./GSE…/fastq/` when ENA has them (the CLI tells you when they aren't available yet).
+- `::path` puts the files somewhere else. If a local file or directory has the same name as an accession, use `./NAME` for the local path or `sra:NAME` / `assembly:NAME` / `geo:NAME` for the accession.
 - Large imports keep running if you close the terminal: press Ctrl-C to detach, `thoa jobs attach <id>` to follow, `thoa jobs cancel <id>` to stop. Files already in your storage are not fetched again.
 
 ## Commands

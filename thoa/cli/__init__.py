@@ -25,8 +25,9 @@ def run_cmd(
         [], "--input", "-i", help="Input path. Local paths keep their current behavior. "
         "Google Drive input is specified as <gdrive_url>::<mount_path>. "
         "Public accessions are fetched server-side: SRA/ENA/DDBJ reads (SRR…, SRX…, SRS…, SAMN…, SRP…, PRJNA…/PRJEB…) "
-        "and NCBI assemblies (GCF_…/GCA_…), e.g. -i SRR390728 or -i PRJNA172563::reads/. "
-        "Prefix with sra: or assembly: if a local path has the same name.",
+        "NCBI assemblies (GCF_…/GCA_…) and GEO series (GSE…: processed files plus raw reads), "
+        "e.g. -i SRR390728 or -i GSE52778::geo/. "
+        "Prefix with sra:, assembly: or geo: if a local path has the same name.",
     ),
     export_to: Optional[str] = typer.Option(
         None, "--export-to", help="Remote export destination such as a Google Drive folder URL. "

@@ -38,8 +38,11 @@ def _gdrive_spec(url: str = "https://drive.google.com/drive/folders/folder-xyz",
 # mock helpers
 # ---------------------------------------------------------------------------
 
-def _manifest_resp(items):
-    return {"items": items}
+def _manifest_resp(items, total_bytes=None):
+    resp = {"items": items}
+    if total_bytes is not None:
+        resp["total_bytes"] = total_bytes
+    return resp
 
 
 def _resolved_context():
@@ -78,6 +81,7 @@ def _patch_all(
     folder_id="folder-xyz",
     file_id=None,
     track_result=None,
+    total_bytes=None,
 ):
     if specs is None:
         specs = [_local_spec(), _gdrive_spec()]
@@ -95,7 +99,7 @@ def _patch_all(
     mock_api = MagicMock()
     mock_api.post.side_effect = [
         {"public_id": _TRANSFER_ID},          # POST /data-transfers
-        _manifest_resp(manifest_items),        # POST .../manifest/unified
+        _manifest_resp(manifest_items, total_bytes),  # POST .../manifest/unified
         {},                                    # POST .../complete (local upload)
         {},                                    # POST .../start
     ]
@@ -356,3 +360,90 @@ def test_no_gdrive_specs_sends_base_dir_not_mount_path():
     gdrive_item = next(i for i in body["items"] if i.get("provider") == "google_drive")
     assert gdrive_item.get("base_dir") == "/home/user"
     assert "mount_path" not in gdrive_item
+
+
+_GB = 1024 ** 3
+
+
+def _gdrive_only_patches(total_bytes):
+    return _patch_all(
+        specs=[_gdrive_spec()],
+        files=[],
+        sizes={},
+        hashes={},
+        manifest_items=[_remote_manifest_item()],
+        total_bytes=total_bytes,
+    )
+
+
+def test_dataset_too_large_for_disk_exits_before_import():
+    """Dataset + 1 GB buffer > storage: exit right after the manifest, before /start."""
+    patches, mock_api = _gdrive_only_patches(total_bytes=int(5.3 * _GB))
+
+    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7], patches[8]:
+        with pytest.raises(SystemExit):
+            lt.create_mixed_dataset([_gdrive_spec()], cwd="/home/user", storage_gb=2)
+
+    assert not any("start" in str(c) for c in mock_api.post.call_args_list)
+
+
+def test_dataset_within_buffer_of_disk_exits():
+    """Mirrors the backend rule: 1.5 GB on a 2 GB disk leaves < 1 GB headroom."""
+    patches, _ = _gdrive_only_patches(total_bytes=int(1.5 * _GB))
+
+    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7], patches[8]:
+        with pytest.raises(SystemExit):
+            lt.create_mixed_dataset([_gdrive_spec()], cwd="/home/user", storage_gb=2)
+
+
+def test_dataset_over_warn_fraction_warns_but_proceeds():
+    """8 GB on a 10 GB disk: above 75% but within the buffer, so warn and continue."""
+    patches, mock_api = _gdrive_only_patches(total_bytes=8 * _GB)
+    console_mock = MagicMock()
+
+    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7], patches[8], \
+         patch.object(lt, "console", console_mock):
+        result = lt.create_mixed_dataset([_gdrive_spec()], cwd="/home/user", storage_gb=10)
+
+    assert result["dataset_public_id"] == _DATASET_ID
+    assert any("may fill up" in str(c) for c in console_mock.print.call_args_list)
+    assert any("start" in str(c) for c in mock_api.post.call_args_list)
+
+
+def test_small_dataset_no_warning():
+    patches, _ = _gdrive_only_patches(total_bytes=1 * _GB)
+    console_mock = MagicMock()
+
+    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7], patches[8], \
+         patch.object(lt, "console", console_mock):
+        lt.create_mixed_dataset([_gdrive_spec()], cwd="/home/user", storage_gb=10)
+
+    assert not any("may fill up" in str(c) for c in console_mock.print.call_args_list)
+
+
+def test_no_storage_skips_disk_check():
+    """storage_gb omitted: no check, even for a dataset larger than any disk."""
+    patches, _ = _gdrive_only_patches(total_bytes=500 * _GB)
+
+    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7], patches[8]:
+        result = lt.create_mixed_dataset([_gdrive_spec()], cwd="/home/user")
+
+    assert result["dataset_public_id"] == _DATASET_ID
+
+
+@pytest.mark.parametrize(
+    "total_gb, storage_gb, exits",
+    [
+        (1.0, 2, False),   # exactly 1 GB headroom: allowed (backend uses strict >)
+        (1.01, 2, True),   # just under 1 GB headroom
+        (2.0, 2, True),    # dataset == disk
+        (0, 1, False),     # empty dataset, minimum disk
+    ],
+)
+def test_check_dataset_fits_disk_buffer_boundary(total_gb, storage_gb, exits):
+    with patch.object(lt, "console", MagicMock()):
+        if exits:
+            with pytest.raises(SystemExit):
+                lt.check_dataset_fits_disk(int(total_gb * _GB), storage_gb)
+        else:
+            lt.check_dataset_fits_disk(int(total_gb * _GB), storage_gb)

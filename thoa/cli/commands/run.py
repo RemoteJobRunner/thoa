@@ -414,7 +414,7 @@ def run_cmd(
                 raise typer.Exit(code=1)
 
 
-    # STEP 2: Validate the user inputs
+    # STEP 2: Create the script and the job
     submit_console = get_console()
     with submit_console.status(f"Starting Job Submission Workflow", spinner="dots12"):
 
@@ -471,6 +471,9 @@ def run_cmd(
             f"/jobs/{job_response['public_id']}",
             json=job_update_payload,
         )
+        if updated_job_response is None:
+            api_client.post(f"/jobs/{job_response['public_id']}/cancel", silent_status_codes={400})
+            raise typer.Exit(code=1)
 
 
         # print(f"Job started successfully. View at: {job_response.get("public_id")}")

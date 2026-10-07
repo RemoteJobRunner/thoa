@@ -303,6 +303,27 @@ def test_run_missing_env_source_creates_no_job():
             "--cmd", "echo zombie",
         ])
 
-    assert result.exit_code != 0, result.output
+    assert isinstance(result.exception, FileNotFoundError), result.output
     posted = [c.args[0] for c in mock_api.post.call_args_list]
     assert "/jobs" not in posted, f"A job was created: {posted}"
+
+
+def test_run_cancels_job_when_attaching_env_fails():
+    mock_api = MagicMock()
+    mock_api.post.side_effect = lambda path, **kwargs: {"public_id": f"{path.strip('/')}-001"}
+    mock_api.put.return_value = None
+    mock_api.get.side_effect = lambda path, **kwargs: (
+        {"valid": True} if path == "/users/validate_job_request" else [{"public_id": "env-001"}]
+    )
+
+    with patch("thoa.cli.commands.run.api_client", mock_api), \
+         patch("thoa.core.job_utils.api_client", mock_api):
+        result = runner.invoke(app, [
+            "run",
+            "--env-id", "env-001",
+            "--cmd", "echo zombie",
+        ])
+
+    assert result.exit_code == 1, result.output
+    posted = [c.args[0] for c in mock_api.post.call_args_list]
+    assert "/jobs/jobs-001/cancel" in posted, f"Job was not cancelled: {posted}"

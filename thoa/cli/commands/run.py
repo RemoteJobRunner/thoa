@@ -386,8 +386,35 @@ def run_cmd(
         )
         raise typer.Exit(code=0)
 
+    # STEP 1: Resolve the environment before the job exists: a dispatched job's flow waits for it while holding a queue slot
+    if env_id:
+        with console.status("Looking up environment", spinner="dots12"):
+            env_results = api_client.get(
+                "/environments",
+                params={"public_id": env_id, "include_related_jobs": False},
+            )
+            if not env_results:
+                console.print(f"[bold red]Error:[/bold red] No environment found with ID [cyan]{env_id}[/cyan]. Use [bold]thoa envs list[/bold] to see your environments.")
+                raise typer.Exit(code=1)
+            environment_details = env_results[0] if isinstance(env_results, list) else env_results
+        console.print(f"[green]Using existing environment[/green] [cyan]{env_id}[/cyan] (status: {environment_details.get('env_status', '?')})")
+    else:
+        with console.status("Packaging Environment", spinner="dots12"):
+            tool_list = tools.split(",") if tools else []
+            env_spec = resolve_environment_spec(env_source=env_source)
 
-    # STEP 1: Validate the user inputs
+            environment_details = api_client.post("/environments",
+                json={
+                    "tools": tool_list,
+                    "env_string": env_spec
+                }
+            )
+            if not environment_details:
+                console.print("[bold red]Failed to create environment. Please check your configuration.[/bold red]")
+                raise typer.Exit(code=1)
+
+
+    # STEP 2: Create the script and the job
     submit_console = get_console()
     with submit_console.status(f"Starting Job Submission Workflow", spinner="dots12"):
 
@@ -426,6 +453,7 @@ def run_cmd(
         # and mount flags even when no input files are provided.
         job_update_payload = {
             "script_public_id": script_response["public_id"],
+            "environment_public_id": environment_details["public_id"],
             "current_working_directory": str(current_working_directory),
             "download_directory": str(download_path),
             "output_directory": str(output),
@@ -443,48 +471,14 @@ def run_cmd(
             f"/jobs/{job_response['public_id']}",
             json=job_update_payload,
         )
+        if updated_job_response is None:
+            api_client.post(f"/jobs/{job_response['public_id']}/cancel", silent_status_codes={400})
+            raise typer.Exit(code=1)
 
 
         # print(f"Job started successfully. View at: {job_response.get("public_id")}")
         submit_console.print(
             f"[bold green]Job started successfully. View at:[/bold green][bold cyan] {settings.THOA_UI_URL}/workbench/jobs/{job_response.get('public_id')}[/bold cyan]")
-
-    # STEP 2: Resolve the environment and attach it to the job
-    if env_id:
-        with console.status("Looking up environment", spinner="dots12"):
-            env_results = api_client.get(
-                "/environments",
-                params={"public_id": env_id, "include_related_jobs": False},
-            )
-            if not env_results:
-                console.print(f"[bold red]Error:[/bold red] No environment found with ID [cyan]{env_id}[/cyan]. Use [bold]thoa envs list[/bold] to see your environments.")
-                return
-            environment_details = env_results[0] if isinstance(env_results, list) else env_results
-        console.print(f"[green]Using existing environment[/green] [cyan]{env_id}[/cyan] (status: {environment_details.get('env_status', '?')})")
-        api_client.put(
-            f"/jobs/{job_response['public_id']}",
-            json={"environment_public_id": environment_details["public_id"]},
-        )
-    else:
-        with console.status("Packaging Environment", spinner="dots12"):
-            tool_list = tools.split(",") if tools else []
-            env_spec = resolve_environment_spec(env_source=env_source)
-
-            environment_details = api_client.post("/environments",
-                json={
-                    "tools": tool_list,
-                    "env_string": env_spec
-                }
-            )
-            if not environment_details:
-                console.print("[bold red]Failed to create environment. Please check your configuration.[/bold red]")
-                return
-
-            api_client.put(
-                f"/jobs/{job_response['public_id']}",
-                json={"environment_public_id": environment_details["public_id"]},
-            )
-
 
     # STEP 3: Trigger validation of the environment ASYNC
     def validate_env_background():

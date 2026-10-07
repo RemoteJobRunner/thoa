@@ -264,3 +264,45 @@ def test_cancel_job_already_completed():
 
     assert result.exit_code == 0
     mock_api.post.assert_called_once_with("/jobs/abc-123-def/cancel")
+
+
+def _mock_api_without_env():
+    mock_api = MagicMock()
+    mock_api.post.side_effect = lambda path, **kwargs: {"public_id": f"{path.strip('/')}-001"}
+    mock_api.put.return_value = {"public_id": "jobs-001"}
+    mock_api.get.side_effect = lambda path, **kwargs: (
+        {"valid": True} if path == "/users/validate_job_request" else []
+    )
+    return mock_api
+
+
+def test_run_unknown_env_id_creates_no_job():
+    mock_api = _mock_api_without_env()
+
+    with patch("thoa.cli.commands.run.api_client", mock_api), \
+         patch("thoa.core.job_utils.api_client", mock_api):
+        result = runner.invoke(app, [
+            "run",
+            "--env-id", "00000000-0000-4000-8000-000000000000",
+            "--cmd", "echo zombie",
+        ])
+
+    assert result.exit_code == 1, result.output
+    posted = [c.args[0] for c in mock_api.post.call_args_list]
+    assert "/jobs" not in posted, f"A job was created: {posted}"
+
+
+def test_run_missing_env_source_creates_no_job():
+    mock_api = _mock_api_without_env()
+
+    with patch("thoa.cli.commands.run.api_client", mock_api), \
+         patch("thoa.core.job_utils.api_client", mock_api):
+        result = runner.invoke(app, [
+            "run",
+            "--env-source", "does-not-exist.yml",
+            "--cmd", "echo zombie",
+        ])
+
+    assert result.exit_code != 0, result.output
+    posted = [c.args[0] for c in mock_api.post.call_args_list]
+    assert "/jobs" not in posted, f"A job was created: {posted}"

@@ -413,8 +413,29 @@ def run_cmd(
                 console.print("[bold red]Failed to create environment. Please check your configuration.[/bold red]")
                 raise typer.Exit(code=1)
 
+    # STEP 2: Hash the file objects and create them on the server, as well as the input dataset object
+    # Also before the job exists: an upload can take hours, all of it holding a queue slot otherwise
+    # No inputs provided at all
+    if not input_dataset and not parsed_inputs:
+        console.print("[yellow]No input files specified. Skipping input upload.[/yellow]")
+        new_input_dataset = None
+        names_to_public_ids = {}
 
-    # STEP 2: Create the script and the job
+    elif input_dataset:
+        console.print(f"[green]Using dataset {input_dataset} as job input.[/green]")
+        console.print("[yellow]Using existing input dataset. Files will be staged under:[/yellow]")
+        rel_paths = list(input_dataset_response.get("adjusted_context", {}).keys())
+        _print_staged_paths(rel_paths)
+        new_input_dataset = None
+        names_to_public_ids = {}
+
+    elif parsed_inputs:
+        _ds = create_mixed_dataset(parsed_inputs, cwd=os.getcwd())
+        new_input_dataset = {"public_id": _ds["dataset_public_id"]}
+        names_to_public_ids = _ds["input_context"]
+
+
+    # STEP 3: Create the script and the job
     submit_console = get_console()
     with submit_console.status(f"Starting Job Submission Workflow", spinner="dots12"):
 
@@ -466,6 +487,9 @@ def run_cmd(
                 if remote_input_context is not None
                 else input_dataset_response.get("adjusted_context", {})
             )
+        elif new_input_dataset:
+            job_update_payload["input_dataset_public_id"] = new_input_dataset["public_id"]
+            job_update_payload["input_context"] = names_to_public_ids
 
         updated_job_response = api_client.put(
             f"/jobs/{job_response['public_id']}",
@@ -480,7 +504,7 @@ def run_cmd(
         submit_console.print(
             f"[bold green]Job started successfully. View at:[/bold green][bold cyan] {settings.THOA_UI_URL}/workbench/jobs/{job_response.get('public_id')}[/bold cyan]")
 
-    # STEP 3: Trigger validation of the environment ASYNC
+    # STEP 4: Trigger validation of the environment ASYNC
     def validate_env_background():
 
         """Background thread to validate the environment."""
@@ -508,44 +532,6 @@ def run_cmd(
     validation_thread = Thread(target=validate_env_background, daemon=True)
     validation_thread.start()
 
-
-    # STEP 4: Hash the file objects and create them on the server, as well as the input dataset object
-    # No inputs provided at all
-    if not input_dataset and not parsed_inputs:
-        console.print("[yellow]No input files specified. Skipping input upload.[/yellow]")
-        new_input_dataset = None
-        names_to_public_ids = {}
-
-    elif input_dataset:
-        console.print(f"[green]Using dataset {input_dataset} as job input.[/green]")
-        console.print("[yellow]Using existing input dataset. Files will be staged under:[/yellow]")
-        rel_paths = list(input_dataset_response.get("adjusted_context", {}).keys())
-        _print_staged_paths(rel_paths)
-        new_input_dataset = None
-        names_to_public_ids = {}
-
-    elif parsed_inputs:
-        try:
-            _ds = create_mixed_dataset(parsed_inputs, cwd=os.getcwd())
-        except BaseException:
-            # Input prep failed after the job (and its flow, which is now
-            # waiting on this input dataset) was already created. Cancel it
-            # rather than leaving the flow waiting forever.
-            api_client.post(f"/jobs/{job_response['public_id']}/cancel", silent_status_codes={400})
-            raise
-        new_input_dataset = {"public_id": _ds["dataset_public_id"]}
-        names_to_public_ids = _ds["input_context"]
-
-    # Only update if we have an input dataset
-    if new_input_dataset:
-        with console.status("Attaching dataset to job...", spinner="dots12"):
-            updated_job_response = api_client.put(
-                f"/jobs/{job_response['public_id']}",
-                json={
-                    "input_dataset_public_id": new_input_dataset["public_id"],
-                    "input_context": names_to_public_ids
-                }
-            )
 
     if new_input_dataset:
         with console.status("Waiting for dataset to be ready", spinner="dots12"):

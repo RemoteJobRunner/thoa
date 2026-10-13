@@ -327,3 +327,70 @@ def test_run_cancels_job_when_attaching_env_fails():
     assert result.exit_code == 1, result.output
     posted = [c.args[0] for c in mock_api.post.call_args_list]
     assert "/jobs/jobs-001/cancel" in posted, f"Job was not cancelled: {posted}"
+
+
+def _mock_api_with_env(calls):
+    def post(path, **kwargs):
+        calls.append(("POST", path))
+        return {"public_id": f"{path.strip('/').replace('/', '-')}-001"}
+
+    def put(path, **kwargs):
+        calls.append(("PUT", path, kwargs.get("json")))
+        return {"public_id": "jobs-001"}
+
+    mock_api = MagicMock()
+    mock_api.post.side_effect = post
+    mock_api.put.side_effect = put
+    mock_api.get.side_effect = lambda path, **kwargs: (
+        {"valid": True} if path == "/users/validate_job_request" else [{"public_id": "env-001"}]
+    )
+    return mock_api
+
+
+def test_run_local_input_failure_creates_no_job(tmp_path):
+    input_file = tmp_path / "data.txt"
+    input_file.write_text("hello")
+    calls = []
+    mock_api = _mock_api_with_env(calls)
+
+    with patch("thoa.cli.commands.run.api_client", mock_api), \
+         patch("thoa.core.job_utils.api_client", mock_api), \
+         patch("thoa.cli.commands.run.create_mixed_dataset", side_effect=RuntimeError("upload failed")):
+        result = runner.invoke(app, [
+            "run",
+            "--input", str(input_file),
+            "--env-id", "env-001",
+            "--cmd", "echo zombie",
+        ])
+
+    assert isinstance(result.exception, RuntimeError), result.output
+    assert ("POST", "/jobs") not in calls, f"A job was created: {calls}"
+
+
+def test_run_local_input_attaches_dataset_in_first_put(tmp_path):
+    input_file = tmp_path / "data.txt"
+    input_file.write_text("hello")
+    calls = []
+    mock_api = _mock_api_with_env(calls)
+
+    def fake_dataset(*args, **kwargs):
+        calls.append(("DATASET",))
+        return {"dataset_public_id": "ds-001", "input_context": {"data.txt": "file-001"}}
+
+    with patch("thoa.cli.commands.run.api_client", mock_api), \
+         patch("thoa.core.job_utils.api_client", mock_api), \
+         patch("thoa.cli.commands.run.create_mixed_dataset", side_effect=fake_dataset):
+        result = runner.invoke(app, [
+            "run",
+            "--input", str(input_file),
+            "--env-id", "env-001",
+            "--cmd", "echo hello",
+            "--run-async",
+        ])
+
+    assert result.exit_code == 0, result.output
+    assert calls.index(("DATASET",)) < calls.index(("POST", "/jobs")), calls
+    puts = [c for c in calls if c[0] == "PUT"]
+    assert len(puts) == 1, puts
+    assert puts[0][2]["input_dataset_public_id"] == "ds-001"
+    assert puts[0][2]["input_context"] == {"data.txt": "file-001"}

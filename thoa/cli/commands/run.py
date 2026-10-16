@@ -638,11 +638,6 @@ def run_cmd(
         }:
             time.sleep(4)
 
-    # Nothing marks the log stream done when we crash, so streaming would hang.
-    if current_job_status(updated_job_response['public_id']) == JobStatus.CRASHED:
-        console.print(f"[red]{CRASHED_MESSAGE}[/red]")
-        raise typer.Exit(code=1)
-
     if current_job_status(updated_job_response['public_id']) == JobStatus.FAILED_VALIDATION:
         if not _handle_validation_failure(updated_job_response['public_id']):
             raise typer.Exit(code=1)
@@ -725,6 +720,11 @@ def run_cmd(
                 console.print(f"\n[yellow]AI is retrying with Attempt {n}...[/yellow]")
             with console.status(f"Waiting for Attempt {n} to start", spinner="dots12"):
                 _wait_for_attempt_running(next_attempt['public_id'])
+
+        # Nothing marks the log stream done when we crash, so streaming would hang.
+        if current_job_status(job_public_id) == JobStatus.CRASHED:
+            console.print(f"[red]{CRASHED_MESSAGE}[/red]")
+            raise typer.Exit(code=1)
 
         outcome = _stream_attempt(next_attempt)
         final_succeeded = outcome == StreamOutcome.SUCCEEDED

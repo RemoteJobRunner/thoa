@@ -45,7 +45,7 @@ from thoa.core.remote_inputs import (
     track_transfer_progress,
 )
 from thoa.core.local_transfer import create_mixed_dataset
-from thoa.core.job_status import JobStatus, UPLOAD_STATUSES, TERMINAL_STATUSES
+from thoa.core.job_status import JobStatus, UPLOAD_STATUSES, TERMINAL_STATUSES, CRASHED_MESSAGE
 
 max_threads = min(32, os.cpu_count() * 2)
 
@@ -634,7 +634,7 @@ def run_cmd(
     with console.status(f"Connecting to your job VM", spinner="dots12"):
         while current_job_status(updated_job_response['public_id']) not in {
             JobStatus.RUNNING, JobStatus.COMPLETED, JobStatus.FAILED_EXECUTION,
-            JobStatus.FAILED_STARTUP, JobStatus.CANCELLED, JobStatus.FAILED_VALIDATION
+            JobStatus.FAILED_STARTUP, JobStatus.CRASHED, JobStatus.CANCELLED, JobStatus.FAILED_VALIDATION
         }:
             time.sleep(4)
 
@@ -679,7 +679,7 @@ def run_cmd(
         deadline = time.time() + timeout
         running_or_terminal = {
             JobStatus.RUNNING, JobStatus.COMPLETED, JobStatus.FAILED_EXECUTION,
-            JobStatus.FAILED_STARTUP, JobStatus.CANCELLED, JobStatus.FAILED_VALIDATION,
+            JobStatus.FAILED_STARTUP, JobStatus.CRASHED, JobStatus.CANCELLED, JobStatus.FAILED_VALIDATION,
         }
         while time.time() < deadline:
             attempt_data = api_client.get(f"/attempts/{attempt_public_id}")
@@ -721,11 +721,20 @@ def run_cmd(
             with console.status(f"Waiting for Attempt {n} to start", spinner="dots12"):
                 _wait_for_attempt_running(next_attempt['public_id'])
 
+        # Nothing marks the log stream done when we crash, so streaming would hang.
+        if current_job_status(job_public_id) == JobStatus.CRASHED:
+            console.print(f"[red]{CRASHED_MESSAGE}[/red]")
+            raise typer.Exit(code=1)
+
         outcome = _stream_attempt(next_attempt)
         final_succeeded = outcome == StreamOutcome.SUCCEEDED
 
         if final_succeeded:
             break
+
+        if current_job_status(job_public_id) == JobStatus.CRASHED:
+            console.print(f"[red]{CRASHED_MESSAGE}[/red]")
+            raise typer.Exit(code=1)
 
         # Failure — wait while AI is analyzing (job status == RETRYING), then check for new attempt
         console.print(f"\n[bold red]Attempt {n} failed.[/bold red]")
@@ -750,7 +759,10 @@ def run_cmd(
             ai_note = (last_attempt or {}).get('ai_note') or ''
             if ai_note:
                 console.print(f"\n[yellow]AI diagnosis:[/yellow] {ai_note}")
-            console.print("[red]No further attempts. Job failed.[/red]")
+            if current_job_status(job_public_id) == JobStatus.CRASHED:
+                console.print(f"[red]{CRASHED_MESSAGE}[/red]")
+            else:
+                console.print("[red]No further attempts. Job failed.[/red]")
             break
 
     if not final_succeeded:

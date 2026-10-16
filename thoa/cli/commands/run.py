@@ -732,6 +732,10 @@ def run_cmd(
         if final_succeeded:
             break
 
+        if current_job_status(job_public_id) == JobStatus.CRASHED:
+            console.print(f"[red]{CRASHED_MESSAGE}[/red]")
+            raise typer.Exit(code=1)
+
         # Failure — wait while AI is analyzing (job status == RETRYING), then check for new attempt
         console.print(f"\n[bold red]Attempt {n} failed.[/bold red]")
         found_next = False

@@ -571,6 +571,7 @@ class Executor(RemoteExecutor):
                 JobStatus.FAILED_VALIDATION,
                 JobStatus.FAILED_PROVISIONING,
                 JobStatus.FAILED_EXECUTION,
+                JobStatus.CRASHED,
                 JobStatus.CANCELLED,
                 "submission_failed",
             }:

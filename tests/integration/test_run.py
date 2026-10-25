@@ -6,14 +6,13 @@ Requires THOA_STAGING_API_URL and THOA_STAGING_API_KEY env vars (or THOA_API_URL
 Run with: pytest tests/integration/test_run.py -v -m slow
 """
 
-import re
 import time
 import uuid
 import pytest
 from typer.testing import CliRunner
 from thoa.cli import app
 from tests.integration.helpers import (
-    get_job_status, poll_job_until_terminal, api_get, api_post, api_put, api_delete,
+    get_job_status, poll_job_until_terminal, api_get, api_post, api_put, api_delete, run_job,
 )
 
 runner = CliRunner()
@@ -24,36 +23,11 @@ def _require_backend(backend_url_and_key):
     pass
 
 
-def _extract_job_id(output: str) -> str | None:
-    m = re.search(r"jobs/([0-9a-f-]{36})", output)
-    return m.group(1) if m else None
-
-
-def _run_job(cli_args: list[str], allow_failure: bool = False) -> tuple[str, str]:
-    """Run a job via CLI, return (job_id, output).
-
-    Forces --max-attempts=1 and --disable-preflight on every integration job so
-    AI retry/preflight paths never engage — they make assertions non-deterministic
-    and previously hung nightly runs in 'retrying' indefinitely.
-
-    Asserts exit_code == 0 by default. Pass allow_failure=True for tests that
-    intentionally submit a failing job (CLI exits non-zero when the job ends
-    in a failed terminal state, which is the correct behavior).
-    """
-    cli_args = [*cli_args, "--max-attempts", "1", "--disable-preflight"]
-    result = runner.invoke(app, cli_args)
-    if not allow_failure:
-        assert result.exit_code == 0, f"CLI failed: {result.output}"
-    job_id = _extract_job_id(result.output)
-    assert job_id, f"No job ID in output: {result.output}"
-    return job_id, result.output
-
-
 # --- VM sizes without input ---
 
 @pytest.mark.slow
 def test_job_2cpu_4ram_no_input():
-    job_id, _ = _run_job([
+    job_id, _ = run_job([
         "run", "--tools", "samtools", "--cmd", "samtools --version",
         "--n-cores", "2", "--ram", "4", "--storage", "20",
     ])
@@ -63,7 +37,7 @@ def test_job_2cpu_4ram_no_input():
 
 @pytest.mark.slow
 def test_job_4cpu_8ram_no_input():
-    job_id, _ = _run_job([
+    job_id, _ = run_job([
         "run", "--tools", "bwa", "--cmd", "bwa 2>&1 | head -1",
         "--n-cores", "4", "--ram", "8", "--storage", "20",
     ])
@@ -73,7 +47,7 @@ def test_job_4cpu_8ram_no_input():
 
 @pytest.mark.slow
 def test_job_8cpu_16ram_no_input():
-    job_id, _ = _run_job([
+    job_id, _ = run_job([
         "run", "--tools", "fastqc", "--cmd", "fastqc --version",
         "--n-cores", "8", "--ram", "16", "--storage", "20",
     ])
@@ -88,7 +62,7 @@ def test_job_with_input_file(tmp_path):
     test_file = tmp_path / "input.txt"
     test_file.write_text("Hello from integration test")
 
-    job_id, _ = _run_job([
+    job_id, _ = run_job([
         "run", "--input", str(test_file), "--tools", "bash",
         "--cmd", "find / -name input.txt -type f 2>/dev/null",
         "--n-cores", "2", "--ram", "4", "--storage", "20",
@@ -105,7 +79,7 @@ def test_job_with_multiple_input_files(tmp_path):
     (d / "b.txt").write_text("file b")
     (d / "c.txt").write_text("file c")
 
-    job_id, _ = _run_job([
+    job_id, _ = run_job([
         "run", "--input", str(d), "--tools", "bash",
         "--cmd", "find / -name '*.txt' -type f 2>/dev/null | wc -l",
         "--n-cores", "2", "--ram", "4", "--storage", "20",
@@ -209,7 +183,7 @@ def test_job_script_failure():
     CLI exits non-zero when the job ends in a failed terminal state, so we
     pass allow_failure=True; the assertion below verifies the status itself.
     """
-    job_id, _ = _run_job([
+    job_id, _ = run_job([
         "run", "--tools", "bash", "--cmd", "echo 'about to fail' && exit 1",
         "--n-cores", "2", "--ram", "4", "--storage", "20",
     ], allow_failure=True)
@@ -225,7 +199,7 @@ def test_local_input_creates_and_attaches_dataset(tmp_path):
     test_file = tmp_path / "transfer_test.txt"
     test_file.write_text("transfer flow integration test")
 
-    job_id, _ = _run_job([
+    job_id, _ = run_job([
         "run", "--input", str(test_file), "--tools", "bash",
         "--cmd", "echo done",
         "--n-cores", "2", "--ram", "4", "--storage", "20",
@@ -258,14 +232,14 @@ def test_local_input_deduplication(tmp_path):
     test_file = tmp_path / "dedup_test.txt"
     test_file.write_text("deduplication content — unique enough for this test run")
 
-    job_id_1, _ = _run_job([
+    job_id_1, _ = run_job([
         "run", "--input", str(test_file), "--tools", "bash",
         "--cmd", "echo done",
         "--n-cores", "2", "--ram", "4", "--storage", "20",
     ])
     assert get_job_status(job_id_1) in {"completed", "cleanup"}
 
-    job_id_2, _ = _run_job([
+    job_id_2, _ = run_job([
         "run", "--input", str(test_file), "--tools", "bash",
         "--cmd", "echo done",
         "--n-cores", "2", "--ram", "4", "--storage", "20",
@@ -306,7 +280,7 @@ def test_dataset_deletion_cleans_up_exclusive_files(tmp_path):
     # Write content unique enough that no other test has uploaded it
     test_file.write_text(f"exclusive deletion test — {time.time()}")
 
-    job_id, _ = _run_job([
+    job_id, _ = run_job([
         "run", "--input", str(test_file), "--tools", "bash",
         "--cmd", "echo done",
         "--n-cores", "2", "--ram", "4", "--storage", "20",
@@ -370,7 +344,7 @@ def test_reuse_existing_input_dataset(tmp_path):
     test_file.write_text("content for dataset reuse test")
 
     # First job: creates the dataset
-    job_id_1, _ = _run_job([
+    job_id_1, _ = run_job([
         "run", "--input", str(test_file), "--tools", "bash",
         "--cmd", "echo done",
         "--n-cores", "2", "--ram", "4", "--storage", "20",
@@ -382,7 +356,7 @@ def test_reuse_existing_input_dataset(tmp_path):
     assert dataset_id, f"First job {job_id_1} has no input_dataset_public_id"
 
     # Second job: reuses the dataset via --input-dataset (no upload)
-    job_id_2, _ = _run_job([
+    job_id_2, _ = run_job([
         "run", "--input-dataset", dataset_id, "--tools", "bash",
         "--cmd", "echo done",
         "--n-cores", "2", "--ram", "4", "--storage", "20",
@@ -408,7 +382,7 @@ def test_dataset_download_after_job(tmp_path):
     download_dir.mkdir()
 
     marker = f"hello from test {uuid.uuid4()}"
-    job_id, _ = _run_job([
+    job_id, _ = run_job([
         "run",
         "--tools", "bash",
         "--cmd", f"mkdir -p /tmp/thoa_test_output && echo '{marker}' > /tmp/thoa_test_output/result.txt",

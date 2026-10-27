@@ -3,6 +3,7 @@ import time
 from thoa.core.job_utils import list_jobs, current_job_status, print_job_detail
 from thoa.core.job_status import JobStatus, TERMINAL_STATUSES
 from thoa.core.api_utils import api_client, StreamOutcome
+from thoa.core.reconnect import JobReconnector
 from rich.console import Console
 from rich.panel import Panel
 
@@ -43,6 +44,15 @@ def attach(
     job_id: str = typer.Argument(..., help="Public ID of the job to attach to."),
 ):
     """Attach to a running job and stream its logs."""
+    # The job runs on the backend regardless; ride out dropped connections.
+    api_client.reconnector = JobReconnector(job_id, console)
+    try:
+        _attach(job_id)
+    finally:
+        api_client.reconnector = None
+
+
+def _attach(job_id: str) -> None:
     status = current_job_status(job_id)
 
     if status in TERMINAL_STATUSES:
@@ -50,7 +60,7 @@ def attach(
         return
 
     if status != JobStatus.RUNNING:
-        with console.status(f"Waiting for job to start running (current: {status})", spinner="dots12"):
+        with api_client.reconnector.status(f"Waiting for job to start running (current: {status})"):
             while status not in TERMINAL_STATUSES and status != JobStatus.RUNNING:
                 time.sleep(4)
                 status = current_job_status(job_id)

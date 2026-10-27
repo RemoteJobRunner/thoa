@@ -314,7 +314,10 @@ def run_cmd(
             )
             raise typer.Exit(code=1)
 
-    else: 
+        # Local files only: GDrive sizes aren't known until a transfer exists, so the backend checks those.
+        check_dataset_fits_disk(sum(file_sizes_in_bytes(all_files).values()), storage)
+
+    else:
         pass
 
     print_config(
@@ -359,7 +362,6 @@ def run_cmd(
             total_size_bytes = sum(file_sizes.values())
             n_files = len(all_files)
             dataset_source = "upload"
-            check_dataset_fits_disk(total_size_bytes, storage)
         else:
             total_size_bytes = 0
             n_files = 0
@@ -519,7 +521,7 @@ def run_cmd(
 
     elif parsed_inputs:
         try:
-            _ds = create_mixed_dataset(parsed_inputs, cwd=os.getcwd(), storage_gb=storage)
+            _ds = create_mixed_dataset(parsed_inputs, cwd=os.getcwd())
         except BaseException:
             # Input prep failed after the job (and its flow, which is now
             # waiting on this input dataset) was already created. Cancel it

@@ -21,6 +21,7 @@ class JobStatus(StrEnum):
     FAILED_PROVISIONING = "failed_provisioning"
     FAILED_EXECUTION = "failed_execution"
     FAILED_STARTUP = "failed_startup"
+    CRASHED = "crashed"
     CLEANUP = "cleanup"
     CANCELLED = "cancelled"
     RETRYING = "retrying"
@@ -34,6 +35,7 @@ TERMINAL_STATUSES = {
     JobStatus.FAILED_PROVISIONING,
     JobStatus.FAILED_UPLOAD,
     JobStatus.FAILED_STARTUP,
+    JobStatus.CRASHED,
     JobStatus.CANCELLED,
 }
 
@@ -43,3 +45,8 @@ UPLOAD_STATUSES = {
     JobStatus.PENDING,
     JobStatus.UPLOADING,
 }
+
+CRASHED_MESSAGE = (
+    "This job crashed due to a failure on our end. Very sorry about that! You will not be billed "
+    "for this job, and our engineers have already been alerted about this and are looking into it."
+)

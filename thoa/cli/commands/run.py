@@ -44,7 +44,7 @@ from thoa.core.remote_inputs import (
     extract_google_drive_folder_id,
     track_transfer_progress,
 )
-from thoa.core.local_transfer import create_mixed_dataset
+from thoa.core.local_transfer import check_dataset_fits_disk, create_mixed_dataset
 from thoa.core.job_status import JobStatus, UPLOAD_STATUSES, TERMINAL_STATUSES, CRASHED_MESSAGE
 
 max_threads = min(32, os.cpu_count() * 2)
@@ -302,15 +302,7 @@ def run_cmd(
             console.print("[bold red]Error:[/bold red] Dataset upload is still in progress and cannot be used as input yet.")
             raise typer.Exit(code=1)
 
-        dataset_size_bytes = input_dataset_response.get("total_size") or 0
-        disk_size_bytes = storage * (1024 ** 3)
-        if dataset_size_bytes > disk_size_bytes:
-            size_gb = dataset_size_bytes / (1024 ** 3)
-            console.print(
-                f"[bold red]Error:[/bold red] Dataset size ({size_gb:.1f} GB) exceeds "
-                f"requested disk space ({storage} GB). Re-run with --storage {int(size_gb) + 1} or larger."
-            )
-            raise typer.Exit(code=1)
+        check_dataset_fits_disk(input_dataset_response.get("total_size") or 0, storage)
 
     elif inputs:
         all_files = collect_files(inputs)
@@ -322,7 +314,10 @@ def run_cmd(
             )
             raise typer.Exit(code=1)
 
-    else: 
+        # Local files only: GDrive sizes aren't known until a transfer exists, so the backend checks those.
+        check_dataset_fits_disk(sum(file_sizes_in_bytes(all_files).values()), storage)
+
+    else:
         pass
 
     print_config(

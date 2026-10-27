@@ -359,6 +359,7 @@ def run_cmd(
             total_size_bytes = sum(file_sizes.values())
             n_files = len(all_files)
             dataset_source = "upload"
+            check_dataset_fits_disk(total_size_bytes, storage)
         else:
             total_size_bytes = 0
             n_files = 0

@@ -48,7 +48,7 @@ def run_cmd(
         64, "--ram", help="Amount of RAM (in GB) to allocate. Defaults to 64 GB."
     ),
     storage: Optional[int] = typer.Option(
-        200, "--storage", help="Free disk space (in GB) required for outputs (post-upload). Defaults to 200 GB."
+        200, "--storage", help="Total disk space (in GB) for the job's inputs and outputs. Defaults to 200 GB."
     ),
     tools: Optional[str] = typer.Option(
         None, "--tools", help="List of tools (e.g., bwa, samtools=1.9). Use multiple flags or comma-separated values."

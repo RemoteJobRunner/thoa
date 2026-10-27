@@ -377,7 +377,7 @@ def _gdrive_only_patches(total_bytes):
 
 
 def test_dataset_too_large_for_disk_exits_before_import():
-    """Dataset + 1 GB buffer > storage: exit right after the manifest, before /start."""
+    """Dataset + 1 GB buffer > storage: exit right after the manifest, before /start, and fail the transfer."""
     patches, mock_api = _gdrive_only_patches(total_bytes=int(5.3 * _GB))
 
     with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7], patches[8]:
@@ -385,6 +385,8 @@ def test_dataset_too_large_for_disk_exits_before_import():
             lt.create_mixed_dataset([_gdrive_spec()], cwd="/home/user", storage_gb=2)
 
     assert not any("start" in str(c) for c in mock_api.post.call_args_list)
+    paths = [c.args[0] for c in mock_api.post.call_args_list]
+    assert paths[-1] == f"/data-transfers/{_TRANSFER_ID}/fail"
 
 
 def test_dataset_within_buffer_of_disk_exits():

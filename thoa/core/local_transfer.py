@@ -151,7 +151,15 @@ def create_mixed_dataset(specs: List[ParsedInputSpec], cwd: str, storage_gb: int
     # Fail before any bytes move if the dataset can't fit; the backend would reject
     # the job anyway, but only after the whole import has finished.
     if storage_gb is not None:
-        check_dataset_fits_disk(manifest_resp.get("total_bytes") or 0, storage_gb)
+        try:
+            check_dataset_fits_disk(manifest_resp.get("total_bytes") or 0, storage_gb)
+        except SystemExit:
+            # Fail the transfer so it isn't left in manifest_created holding a GDrive credential.
+            api_client.post(
+                f"/data-transfers/{transfer_id}/fail",
+                json={"error_message": f"Input data does not fit on the requested {storage_gb} GB disk."},
+            )
+            raise
 
     # Check for mount path conflicts (server returns 409 on conflict)
     items = manifest_resp.get("items", [])

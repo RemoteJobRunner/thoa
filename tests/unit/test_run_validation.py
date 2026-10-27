@@ -327,3 +327,13 @@ def test_run_cancels_job_when_attaching_env_fails():
     assert result.exit_code == 1, result.output
     posted = [c.args[0] for c in mock_api.post.call_args_list]
     assert "/jobs/jobs-001/cancel" in posted, f"Job was not cancelled: {posted}"
+
+
+def test_no_cache_flag_is_forwarded_to_run_cmd():
+    for extra, expected in (([], False), (["--no-cache"], True)):
+        with patch("thoa.cli.run.run_cmd") as mock_run:
+            result = runner.invoke(app, [
+                "run", "--tools", "bash", "--cmd", "echo hello", *extra,
+            ])
+        assert result.exit_code == 0, result.output
+        assert mock_run.call_args.kwargs["no_cache"] is expected

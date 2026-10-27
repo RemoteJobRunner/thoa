@@ -194,6 +194,7 @@ def run_cmd(
     strict: bool = False,
     max_attempts: int = 3,
     disable_preflight: bool = False,
+    no_cache: bool = False,
 ):
     
     """Run the job with the given configuration using the Bioconda-based execution environment."""
@@ -526,7 +527,7 @@ def run_cmd(
 
     elif parsed_inputs:
         try:
-            _ds = create_mixed_dataset(parsed_inputs, cwd=os.getcwd())
+            _ds = create_mixed_dataset(parsed_inputs, cwd=os.getcwd(), use_cache=not no_cache)
         except BaseException:
             # Input prep failed after the job (and its flow, which is now
             # waiting on this input dataset) was already created. Cancel it

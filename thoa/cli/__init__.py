@@ -96,6 +96,9 @@ def run_cmd(
     disable_preflight: bool = typer.Option(
         False, "--disable-preflight", help="Skip preflight resource validation checks."
     ),
+    no_cache: bool = typer.Option(
+        False, "--no-cache", help="Recompute all input file hashes instead of reusing cached hashes from ~/.thoa/hash_cache.json."
+    ),
 ):
 
     has_input_data = bool(inputs) or bool(input_dataset)
@@ -138,6 +141,7 @@ def run_cmd(
         strict=strict,
         max_attempts=max_attempts,
         disable_preflight=disable_preflight,
+        no_cache=no_cache,
     )
 
     

@@ -5,6 +5,7 @@ from typing import List
 from rich.progress import BarColumn, MofNCompleteColumn, Progress, TextColumn
 
 from thoa.core.api_utils import api_client
+from thoa.core.hash_cache import hash_files_cached
 from thoa.core.input_specs import ParsedInputSpec
 from thoa.core.job_utils import (
     collect_files,
@@ -15,11 +16,12 @@ from thoa.core.job_utils import (
 )
 
 
-def create_mixed_dataset(specs: List[ParsedInputSpec], cwd: str) -> dict:
+def create_mixed_dataset(specs: List[ParsedInputSpec], cwd: str, use_cache: bool = True) -> dict:
     """Upload a mixed set of local and Google Drive inputs as a single dataset.
 
     Handles arbitrary combinations of local files/directories and GDrive URLs,
-    with optional ::mount_path suffixes on each spec. Returns:
+    with optional ::mount_path suffixes on each spec. Local file hashes are
+    reused from the local hash cache unless use_cache is False. Returns:
         dataset_public_id: str | None
         input_context: {mount_path: file_public_id, ...}
     """
@@ -52,7 +54,12 @@ def create_mixed_dataset(specs: List[ParsedInputSpec], cwd: str) -> dict:
             console=console,
         ) as progress:
             task = progress.add_task("Hashing files", total=len(all_local_files))
-            all_hashes = hash_all(all_local_files, on_progress=lambda: progress.advance(task))
+            all_hashes = hash_files_cached(
+                all_local_files,
+                hash_fn=hash_all,
+                use_cache=use_cache,
+                on_progress=lambda: progress.advance(task),
+            )
     else:
         all_hashes = {}
 

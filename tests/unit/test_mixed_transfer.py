@@ -356,3 +356,20 @@ def test_no_gdrive_specs_sends_base_dir_not_mount_path():
     gdrive_item = next(i for i in body["items"] if i.get("provider") == "google_drive")
     assert gdrive_item.get("base_dir") == "/home/user"
     assert "mount_path" not in gdrive_item
+
+
+@pytest.mark.parametrize("use_cache", [True, False])
+def test_local_hashing_goes_through_hash_cache(use_cache):
+    specs = [_local_spec()]
+    patches, _ = _patch_all(specs=specs, manifest_items=[_local_manifest_item()])
+    cached = MagicMock(return_value={_FILE_A: "md5-a"})
+    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7], patches[8], \
+         patch.object(lt, "hash_files_cached", cached):
+        patched_hash_all = lt.hash_all
+        lt.create_mixed_dataset(specs, cwd="/home/user", use_cache=use_cache)
+
+    cached.assert_called_once()
+    args, kwargs = cached.call_args
+    assert args[0] == [_FILE_A]
+    assert kwargs["use_cache"] is use_cache
+    assert kwargs["hash_fn"] is patched_hash_all

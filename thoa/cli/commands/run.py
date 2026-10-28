@@ -52,7 +52,7 @@ from thoa.core.local_transfer import (
     track_transfer,
     upload_local_items,
 )
-from thoa.core.job_status import JobStatus, UPLOAD_STATUSES, TERMINAL_STATUSES
+from thoa.core.job_status import JobStatus, UPLOAD_STATUSES, TERMINAL_STATUSES, CRASHED_MESSAGE
 
 max_threads = min(32, os.cpu_count() * 2)
 
@@ -405,6 +405,32 @@ def run_cmd(
         )
         raise typer.Exit(code=0)
 
+    # STEP 1: Resolve the environment before the job exists: a dispatched job's flow waits for it while holding a queue slot
+    if env_id:
+        with console.status("Looking up environment", spinner="dots12"):
+            env_results = api_client.get(
+                "/environments",
+                params={"public_id": env_id, "include_related_jobs": False},
+            )
+            if not env_results:
+                console.print(f"[bold red]Error:[/bold red] No environment found with ID [cyan]{env_id}[/cyan]. Use [bold]thoa envs list[/bold] to see your environments.")
+                raise typer.Exit(code=1)
+            environment_details = env_results[0] if isinstance(env_results, list) else env_results
+        console.print(f"[green]Using existing environment[/green] [cyan]{env_id}[/cyan] (status: {environment_details.get('env_status', '?')})")
+    else:
+        with console.status("Packaging Environment", spinner="dots12"):
+            tool_list = tools.split(",") if tools else []
+            env_spec = resolve_environment_spec(env_source=env_source)
+
+            environment_details = api_client.post("/environments",
+                json={
+                    "tools": tool_list,
+                    "env_string": env_spec
+                }
+            )
+            if not environment_details:
+                console.print("[bold red]Failed to create environment. Please check your configuration.[/bold red]")
+                raise typer.Exit(code=1)
 
     # Resolve accessions and build the manifest before any job exists, so bad
     # accessions, path collisions and quota problems fail without leaving a job.
@@ -412,7 +438,7 @@ def run_cmd(
     if public_specs:
         prepared = prepare_mixed_transfer(parsed_inputs, cwd=os.getcwd())
 
-    # STEP 1: Validate the user inputs
+    # STEP 2: Create the script and the job
     submit_console = get_console()
     with submit_console.status(f"Starting Job Submission Workflow", spinner="dots12"):
 
@@ -452,6 +478,7 @@ def run_cmd(
         # and mount flags even when no input files are provided.
         job_update_payload = {
             "script_public_id": script_response["public_id"],
+            "environment_public_id": environment_details["public_id"],
             "current_working_directory": str(current_working_directory),
             "download_directory": str(download_path),
             "output_directory": str(output),
@@ -469,48 +496,14 @@ def run_cmd(
             f"/jobs/{job_response['public_id']}",
             json=job_update_payload,
         )
+        if updated_job_response is None:
+            api_client.post(f"/jobs/{job_response['public_id']}/cancel", silent_status_codes={400})
+            raise typer.Exit(code=1)
 
 
         # print(f"Job started successfully. View at: {job_response.get("public_id")}")
         submit_console.print(
             f"[bold green]Job started successfully. View at:[/bold green][bold cyan] {settings.THOA_UI_URL}/workbench/jobs/{job_response.get('public_id')}[/bold cyan]")
-
-    # STEP 2: Resolve the environment and attach it to the job
-    if env_id:
-        with console.status("Looking up environment", spinner="dots12"):
-            env_results = api_client.get(
-                "/environments",
-                params={"public_id": env_id, "include_related_jobs": False},
-            )
-            if not env_results:
-                console.print(f"[bold red]Error:[/bold red] No environment found with ID [cyan]{env_id}[/cyan]. Use [bold]thoa envs list[/bold] to see your environments.")
-                return
-            environment_details = env_results[0] if isinstance(env_results, list) else env_results
-        console.print(f"[green]Using existing environment[/green] [cyan]{env_id}[/cyan] (status: {environment_details.get('env_status', '?')})")
-        api_client.put(
-            f"/jobs/{job_response['public_id']}",
-            json={"environment_public_id": environment_details["public_id"]},
-        )
-    else:
-        with console.status("Packaging Environment", spinner="dots12"):
-            tool_list = tools.split(",") if tools else []
-            env_spec = resolve_environment_spec(env_source=env_source)
-
-            environment_details = api_client.post("/environments",
-                json={
-                    "tools": tool_list,
-                    "env_string": env_spec
-                }
-            )
-            if not environment_details:
-                console.print("[bold red]Failed to create environment. Please check your configuration.[/bold red]")
-                return
-
-            api_client.put(
-                f"/jobs/{job_response['public_id']}",
-                json={"environment_public_id": environment_details["public_id"]},
-            )
-
 
     # STEP 3: Trigger validation of the environment ASYNC
     def validate_env_background():
@@ -708,7 +701,7 @@ def run_cmd(
     with console.status(f"Connecting to your job VM", spinner="dots12"):
         while current_job_status(updated_job_response['public_id']) not in {
             JobStatus.RUNNING, JobStatus.COMPLETED, JobStatus.FAILED_EXECUTION,
-            JobStatus.FAILED_STARTUP, JobStatus.CANCELLED, JobStatus.FAILED_VALIDATION
+            JobStatus.FAILED_STARTUP, JobStatus.CRASHED, JobStatus.CANCELLED, JobStatus.FAILED_VALIDATION
         }:
             time.sleep(4)
 
@@ -753,7 +746,7 @@ def run_cmd(
         deadline = time.time() + timeout
         running_or_terminal = {
             JobStatus.RUNNING, JobStatus.COMPLETED, JobStatus.FAILED_EXECUTION,
-            JobStatus.FAILED_STARTUP, JobStatus.CANCELLED, JobStatus.FAILED_VALIDATION,
+            JobStatus.FAILED_STARTUP, JobStatus.CRASHED, JobStatus.CANCELLED, JobStatus.FAILED_VALIDATION,
         }
         while time.time() < deadline:
             attempt_data = api_client.get(f"/attempts/{attempt_public_id}")
@@ -795,11 +788,20 @@ def run_cmd(
             with console.status(f"Waiting for Attempt {n} to start", spinner="dots12"):
                 _wait_for_attempt_running(next_attempt['public_id'])
 
+        # Nothing marks the log stream done when we crash, so streaming would hang.
+        if current_job_status(job_public_id) == JobStatus.CRASHED:
+            console.print(f"[red]{CRASHED_MESSAGE}[/red]")
+            raise typer.Exit(code=1)
+
         outcome = _stream_attempt(next_attempt)
         final_succeeded = outcome == StreamOutcome.SUCCEEDED
 
         if final_succeeded:
             break
+
+        if current_job_status(job_public_id) == JobStatus.CRASHED:
+            console.print(f"[red]{CRASHED_MESSAGE}[/red]")
+            raise typer.Exit(code=1)
 
         # Failure — wait while AI is analyzing (job status == RETRYING), then check for new attempt
         console.print(f"\n[bold red]Attempt {n} failed.[/bold red]")
@@ -824,7 +826,10 @@ def run_cmd(
             ai_note = (last_attempt or {}).get('ai_note') or ''
             if ai_note:
                 console.print(f"\n[yellow]AI diagnosis:[/yellow] {ai_note}")
-            console.print("[red]No further attempts. Job failed.[/red]")
+            if current_job_status(job_public_id) == JobStatus.CRASHED:
+                console.print(f"[red]{CRASHED_MESSAGE}[/red]")
+            else:
+                console.print("[red]No further attempts. Job failed.[/red]")
             break
 
     if not final_succeeded:

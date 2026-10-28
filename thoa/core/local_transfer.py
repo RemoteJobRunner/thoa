@@ -1,4 +1,5 @@
 import os
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List
@@ -34,6 +35,10 @@ class PreparedTransfer:
     @property
     def has_public_items(self) -> bool:
         return any(item.get("provider") in PUBLIC_PROVIDERS for item in self.items)
+
+    @property
+    def has_local_uploads(self) -> bool:
+        return any(item.get("upload_required") and item.get("provider") == "local" for item in self.items)
 
 
 def _format_bytes(n: int) -> str:
@@ -192,9 +197,50 @@ def prepare_mixed_transfer(specs: List[ParsedInputSpec], cwd: str) -> PreparedTr
     )
 
 
+class ClientHeartbeat:
+    """Tells the server this CLI is still uploading the import's local files.
+
+    The import (and the job staging its files) waits for them; without a beat for
+    10 minutes the server fails both, since nothing else can upload these files.
+    Modelled on the env-validation poller in run.py: a daemon thread, so it never
+    keeps the CLI alive."""
+
+    INTERVAL_SECONDS = 60
+
+    def __init__(self, transfer_id: str):
+        self._transfer_id = transfer_id
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def __enter__(self):
+        self._beat()
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._stop.set()
+
+    def _beat(self) -> None:
+        try:
+            api_client.post(
+                f"/data-transfers/{self._transfer_id}/client-heartbeat",
+                silent_status_codes={400, 401, 403, 404, 409, 500, 502, 503},
+            )
+        except Exception:
+            pass  # A missed beat is harmless: the server allows 10 minutes.
+
+    def _run(self) -> None:
+        while not self._stop.wait(self.INTERVAL_SECONDS):
+            self._beat()
+
+
 def upload_local_items(prepared: PreparedTransfer) -> None:
-    """Upload the local files the manifest still needs."""
-    to_upload = [item for item in prepared.items if item.get("upload_required") and item.get("provider") == "local"]
+    """Upload the local files the manifest still needs, smallest first: samplesheets and
+    configs land within seconds, so the job can stage them while big files upload."""
+    to_upload = sorted(
+        (item for item in prepared.items if item.get("upload_required") and item.get("provider") == "local"),
+        key=lambda item: item.get("size") or 0,
+    )
     path_str_to_local = {str(p): p for p in prepared.local_files}
     if not to_upload:
         return
@@ -227,8 +273,9 @@ def start_transfer(prepared: PreparedTransfer) -> None:
         api_client.post(f"/data-transfers/{prepared.transfer_id}/start")
 
 
-def track_transfer(prepared: PreparedTransfer) -> dict:
-    """Follow the import until it ends; returns {dataset_public_id, input_context}.
+def track_transfer(prepared: PreparedTransfer) -> None:
+    """Show the import's progress until it ends. The job already has its dataset
+    and stages each file as it lands; this only reports.
 
     Raises RuntimeError with the server's reason if the import failed.
     """
@@ -242,24 +289,3 @@ def track_transfer(prepared: PreparedTransfer) -> dict:
         transfer_view = api_client.get(f"/data-transfers/{prepared.transfer_id}")
         error = (transfer_view or {}).get("error_message") or final.get("status") or "unknown error"
         raise RuntimeError(f"Dataset import failed: {error}")
-
-    resolved = api_client.get(f"/data-transfers/{prepared.transfer_id}/resolved-context")
-
-    return {
-        "dataset_public_id": resolved["dataset_public_id"],
-        "input_context": resolved["input_context"],
-    }
-
-
-def create_mixed_dataset(specs: List[ParsedInputSpec], cwd: str) -> dict:
-    """Upload a mixed set of local and Google Drive inputs as a single dataset.
-
-    Handles arbitrary combinations of local files/directories and GDrive URLs,
-    with optional ::mount_path suffixes on each spec. Returns:
-        dataset_public_id: str | None
-        input_context: {mount_path: file_public_id, ...}
-    """
-    prepared = prepare_mixed_transfer(specs, cwd)
-    upload_local_items(prepared)
-    start_transfer(prepared)
-    return track_transfer(prepared)

@@ -1,4 +1,5 @@
-"""`thoa run -i <accession>`: manifest before the job, server-side import, detach on Ctrl-C."""
+"""`thoa run -i <input>`: manifest before the job, then start the import and upload any
+local files under a client heartbeat; the job stages each file as it lands. Detach on Ctrl-C."""
 
 from unittest.mock import MagicMock, patch
 
@@ -40,10 +41,15 @@ def _mock_api(calls):
     return api
 
 
-def _invoke(extra_args, *, track=None):
+def _invoke(extra_args, *, track=None, items=None, upload=None):
     calls, order = [], []
     api = _mock_api(calls)
-    prepared = PreparedTransfer(transfer_id=TRANSFER_ID, manifest={"items": [{"provider": "sra", "size": 10}]})
+    prepared = PreparedTransfer(
+        transfer_id=TRANSFER_ID, manifest={"items": items or [{"provider": "sra", "size": 10}]},
+    )
+    heartbeat = MagicMock()
+    heartbeat.return_value.__enter__.side_effect = lambda *a: order.append(("heartbeat on", TRANSFER_ID))
+    heartbeat.return_value.__exit__.side_effect = lambda *a: order.append(("heartbeat off", TRANSFER_ID))
 
     def prepare(specs, cwd):
         order.append(("prepare", [(s.kind, s.source) for s in specs]))
@@ -56,9 +62,10 @@ def _invoke(extra_args, *, track=None):
     with patch("thoa.cli.commands.run.api_client", api), \
          patch("thoa.core.job_utils.api_client", api), \
          patch("thoa.cli.commands.run.prepare_mixed_transfer", side_effect=prepare), \
-         patch("thoa.cli.commands.run.upload_local_items", side_effect=lambda p: order.append(("upload", p.transfer_id))), \
+         patch("thoa.cli.commands.run.upload_local_items", side_effect=upload or (lambda p: order.append(("upload", p.transfer_id)))), \
          patch("thoa.cli.commands.run.start_transfer", side_effect=lambda p: order.append(("start", p.transfer_id))), \
-         patch("thoa.cli.commands.run.track_transfer", side_effect=track or (lambda p: {"dataset_public_id": "d", "input_context": {}})), \
+         patch("thoa.cli.commands.run.track_transfer", side_effect=track or (lambda p: None)), \
+         patch("thoa.cli.commands.run.ClientHeartbeat", heartbeat), \
          patch("thoa.cli.commands.run.current_job_status", return_value="completed"), \
          patch("thoa.cli.commands.run.time", mock_time), \
          patch("thoa.core.resolve_environment_spec", return_value=""):
@@ -75,16 +82,42 @@ def test_accession_job_is_linked_to_the_prepared_import():
 
     assert result.exit_code == 0, result.output
     assert order[0] == ("prepare", [("sra", "SRR390728")])
-    assert _job_post(calls)["pending_import_transfer_public_id"] == TRANSFER_ID
-    assert ("upload", TRANSFER_ID) in order and ("start", TRANSFER_ID) in order
+    assert _job_post(calls)["input_transfer_public_id"] == TRANSFER_ID
+    # Nothing local to upload: the import just starts, with no heartbeat thread.
+    assert order[1:] == [("start", TRANSFER_ID)]
 
 
 def test_run_async_returns_right_after_starting_the_import():
     result, calls, _ = _invoke(["--run-async"])
     assert JOB_ID in result.output
-    assert "runs server-side" in result.output
+    assert "server-side" in result.output
     # The backend attaches the dataset itself; the CLI never PUTs it.
     assert not any(method == "PUT" and body and "input_dataset_public_id" in body for method, _, body in calls)
+
+
+def test_local_files_upload_after_the_import_starts_under_a_heartbeat():
+    """Server-side copies start at once; the CLI then uploads its own files, telling
+    the server it is alive, and --run-async returns once they are up."""
+    items = [{"provider": "sra", "size": 10}, {"provider": "local", "upload_required": True, "size": 5}]
+    result, calls, order = _invoke(["--run-async"], items=items)
+
+    assert result.exit_code == 0, result.output
+    assert order[1:] == [
+        ("heartbeat on", TRANSFER_ID), ("start", TRANSFER_ID), ("upload", TRANSFER_ID), ("heartbeat off", TRANSFER_ID),
+    ]
+    # The job existed before any byte moved.
+    assert _job_post(calls) is not None
+
+
+def test_failed_local_upload_cancels_the_job():
+    def boom(_prepared):
+        raise OSError("connection reset")
+
+    items = [{"provider": "local", "upload_required": True, "size": 5}]
+    result, calls, _ = _invoke([], items=items, upload=boom)
+
+    assert result.exit_code != 0
+    assert any(path == f"/jobs/{JOB_ID}/cancel" for _, path, _ in calls)
 
 
 def test_ctrl_c_while_following_detaches_without_cancelling():

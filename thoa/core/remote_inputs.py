@@ -30,7 +30,7 @@ PUBLIC_ACCESSION_PATTERNS = {
     "sra": re.compile(r"[SED]R[RXSP]\d{6,}|PRJ(?:NA|EB|DB)\d+|SAM(?:N|EA|D)\d+"),
     # NCBI genome assemblies
     "ncbi_assembly": re.compile(r"GC[AF]_\d{9}(?:\.\d+)?"),
-    # GEO series: supplementary files plus the linked raw reads (when ENA has them)
+    # GEO series: the linked raw reads (when ENA has them)
     "geo": re.compile(r"GSE\d+"),
 }
 PUBLIC_PROVIDERS = frozenset(PUBLIC_ACCESSION_PATTERNS)
@@ -76,16 +76,6 @@ def detect_remote_ref_kind(value: str | None) -> str:
     if value.startswith("s3://"):
         return "s3"
     return "unknown"
-
-
-def project_input_context(input_root: str, input_context: dict[str, object]) -> dict[str, object]:
-    root = input_root.rstrip("/") or "/"
-    projected = {}
-    for path, file_id in input_context.items():
-        rel_path = str(path).lstrip("/")
-        projected_path = f"{root}/{rel_path}" if root != "/" else f"/{rel_path}"
-        projected[projected_path] = file_id
-    return projected
 
 
 def extract_google_drive_folder_id(value: str) -> str | None:
@@ -403,111 +393,3 @@ def _track_transfer_bytes(transfer_id: str, *, label: str, poll_interval_seconds
                 return manifest
 
             time.sleep(poll_interval_seconds)
-
-
-def print_manifest_summary(manifest: dict) -> None:
-    """Render the 'manifest ready' + skipped-items block.
-
-    Kept separate from ``import_google_drive_input`` so callers can position
-    it freely (e.g. after the job-configuration table) instead of having
-    it always print inline with manifest creation.
-    """
-    if not manifest:
-        return
-    total_items = manifest.get("total_items", 0)
-    skipped_count = manifest.get("skipped_items", 0)
-    importable = total_items - skipped_count
-    console.print(
-        f"[green]Google Drive manifest ready:[/green] "
-        f"{importable} importable item(s), {manifest.get('total_bytes', 0)} bytes"
-    )
-    if skipped_count:
-        console.print(
-            f"[yellow]Skipping {skipped_count} unsupported item(s):[/yellow]"
-        )
-        samples = manifest.get("skipped_samples", [])
-        for sample in samples:
-            console.print(
-                f"  [dim]- {sample['path']} "
-                f"({sample.get('mime_type') or 'unknown type'})[/dim]"
-            )
-        if len(samples) < skipped_count:
-            console.print(
-                f"  [dim]... and {skipped_count - len(samples)} more[/dim]"
-            )
-
-
-def import_google_drive_input(
-    source_url: str,
-    *,
-    retain_credential_for_export: bool = False,
-    defer_execution: bool = False,
-) -> dict[str, object]:
-    folder_id = extract_google_drive_folder_id(source_url)
-    file_id = None if folder_id else extract_google_drive_file_id(source_url)
-    if not folder_id and not file_id:
-        console.print("[bold red]Invalid Google Drive URL.[/bold red]")
-        raise typer.Exit(code=1)
-
-    remote_ref: dict[str, object] = {"provider": "google_drive"}
-    if folder_id:
-        remote_ref["folder_id"] = folder_id
-    else:
-        remote_ref["file_id"] = file_id
-
-    transfer = api_client.post(
-        "/data-transfers",
-        json={
-            "provider": "google_drive",
-            "direction": "import",
-            "remote_ref": remote_ref,
-            "retain_credential_for_export": retain_credential_for_export,
-        },
-    )
-    if not transfer:
-        raise typer.Exit(code=1)
-
-    transfer_id = transfer["public_id"]
-    auth_complete = authorize_google_drive_transfer(transfer_id)
-    if not auth_complete:
-        raise typer.Exit(code=1)
-
-    manifest_status = api_client.post(f"/data-transfers/{transfer_id}/manifest")
-    if not manifest_status:
-        raise typer.Exit(code=1)
-
-    manifest = api_client.get(f"/data-transfers/{transfer_id}/manifest")
-
-    if defer_execution:
-        return {
-            "transfer_public_id": transfer_id,
-            "status": manifest_status.get("status"),
-            "manifest": manifest,
-        }
-
-    start_status = api_client.post(f"/data-transfers/{transfer_id}/start")
-    if not start_status:
-        raise typer.Exit(code=1)
-
-    final = track_transfer_progress(transfer_id, label="Importing Google Drive data")
-
-    if final.get("status") == "failed":
-        status_blob = api_client.get(f"/data-transfers/{transfer_id}")
-        error = (status_blob or {}).get("error_message") or "unknown error"
-        console.print(f"[bold red]Google Drive import failed:[/bold red] {error}")
-        raise typer.Exit(code=1)
-
-    console.print(
-        f"[green]Imported {final.get('completed_items', 0)} file(s), "
-        f"{final.get('completed_bytes', 0)} bytes "
-        f"(skipped {final.get('skipped_items', 0)})[/green]"
-    )
-
-    resolved = api_client.get(f"/data-transfers/{transfer_id}/resolved-context")
-    if not resolved:
-        raise typer.Exit(code=1)
-    dataset_public_id = resolved.get("dataset_public_id")
-    if not dataset_public_id:
-        console.print("[bold red]Transfer completed without dataset id.[/bold red]")
-        raise typer.Exit(code=1)
-    return resolved

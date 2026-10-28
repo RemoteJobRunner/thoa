@@ -1,5 +1,6 @@
 """
-Unit tests for thoa.core.local_transfer.create_mixed_dataset().
+Unit tests for thoa.core.local_transfer: prepare_mixed_transfer, then start_transfer,
+upload_local_items and track_transfer, the steps `thoa run` takes around job creation.
 
 Patches api_client, collect_files, file_sizes_in_bytes, hash_all, upload_file_sas,
 and the remote_inputs helpers so no real filesystem, network, or OAuth is needed.
@@ -18,8 +19,6 @@ import thoa.core.local_transfer as lt
 
 _TRANSFER_ID = "transfer-mix"
 _FILE_A = Path("/tmp/a.txt")
-_DATASET_ID = "dataset-mix"
-_INPUT_CONTEXT = {"/home/user/my-folder/report.csv": "file-id-remote"}
 
 
 # ---------------------------------------------------------------------------
@@ -40,10 +39,6 @@ def _gdrive_spec(url: str = "https://drive.google.com/drive/folders/folder-xyz",
 
 def _manifest_resp(items):
     return {"items": items}
-
-
-def _resolved_context():
-    return {"dataset_public_id": _DATASET_ID, "input_context": _INPUT_CONTEXT}
 
 
 def _local_manifest_item(path=str(_FILE_A), upload_required=True):
@@ -96,11 +91,8 @@ def _patch_all(
     mock_api.post.side_effect = [
         {"public_id": _TRANSFER_ID},          # POST /data-transfers
         _manifest_resp(manifest_items),        # POST .../manifest/unified
-        {},                                    # POST .../complete (local upload)
         {},                                    # POST .../start
-    ]
-    mock_api.get.side_effect = [
-        _resolved_context(),                   # GET .../resolved-context
+        {},                                    # POST .../complete (local upload)
     ]
 
     patches = [
@@ -117,22 +109,35 @@ def _patch_all(
     return patches, mock_api
 
 
+def _import(specs, cwd="/home/user"):
+    """The steps `thoa run` takes, minus the job it creates in between."""
+    prepared = lt.prepare_mixed_transfer(specs, cwd=cwd)
+    lt.start_transfer(prepared)
+    lt.upload_local_items(prepared)
+    lt.track_transfer(prepared)
+    return prepared
+
+
 def _run(specs, cwd="/home/user", patches=None, mock_api=None):
     if patches is None:
         patches, mock_api = _patch_all(specs=specs)
     with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7], patches[8]:
-        return lt.create_mixed_dataset(specs, cwd=cwd), mock_api
+        return _import(specs, cwd=cwd), mock_api
 
 
 # ---------------------------------------------------------------------------
 # tests
 # ---------------------------------------------------------------------------
 
-def test_happy_path_returns_dataset_and_context():
+def test_happy_path_starts_the_import_uploads_and_never_fetches_a_dataset():
+    """The backend attached the dataset to the job at creation, so the CLI never asks for it."""
     specs = [_local_spec(), _gdrive_spec()]
-    result, _ = _run(specs)
-    assert result["dataset_public_id"] == _DATASET_ID
-    assert result["input_context"] == _INPUT_CONTEXT
+    prepared, mock_api = _run(specs)
+    posted = [c.args[0] for c in mock_api.post.call_args_list]
+    assert posted[2] == f"/data-transfers/{_TRANSFER_ID}/start"
+    assert posted[3] == f"/data-transfers/{_TRANSFER_ID}/import/items/item-local-a/complete"
+    assert mock_api.get.call_args_list == []
+    assert prepared.has_local_uploads is True
 
 
 def test_creates_transfer_then_posts_unified_manifest():
@@ -162,7 +167,7 @@ def test_gdrive_authorizes_before_manifest():
     patches[5] = patch("thoa.core.remote_inputs.authorize_google_drive_transfer", auth_mock)
 
     with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7], patches[8]:
-        lt.create_mixed_dataset(specs, cwd="/home/user")
+        _import(specs, cwd="/home/user")
 
     auth_mock.assert_called_once_with(_TRANSFER_ID)
     # Auth must happen before the manifest POST
@@ -183,7 +188,7 @@ def test_local_only_skips_gdrive_auth():
     patches[5] = patch("thoa.core.remote_inputs.authorize_google_drive_transfer", auth_mock)
 
     with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7], patches[8]:
-        lt.create_mixed_dataset(specs, cwd="/home/user")
+        _import(specs, cwd="/home/user")
 
     auth_mock.assert_not_called()
 
@@ -196,7 +201,7 @@ def test_local_file_uploaded_gdrive_file_not():
     patches[4] = patch.object(lt, "upload_file_sas", upload_mock)
 
     with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7], patches[8]:
-        lt.create_mixed_dataset(specs, cwd="/home/user")
+        _import(specs, cwd="/home/user")
 
     # Called exactly once (for the local file only)
     upload_mock.assert_called_once()
@@ -216,7 +221,7 @@ def test_local_upload_skipped_when_not_required():
     patches[4] = patch.object(lt, "upload_file_sas", upload_mock)
 
     with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7], patches[8]:
-        lt.create_mixed_dataset(specs, cwd="/home/user")
+        _import(specs, cwd="/home/user")
 
     upload_mock.assert_not_called()
 
@@ -233,7 +238,7 @@ def test_remote_skipped_message_printed(capsys):
     )
 
     with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7], patches[8]:
-        lt.create_mixed_dataset(specs, cwd="/home/user")
+        _import(specs, cwd="/home/user")
 
     # Rich console output isn't captured by capsys — check api calls instead:
     # the start POST must still happen (flow runs even for skipped items)
@@ -253,10 +258,11 @@ def test_remote_skipped_message_printed(capsys):
          patch("thoa.core.remote_inputs.extract_google_drive_folder_id", return_value="folder-xyz"), \
          patch("thoa.core.remote_inputs.extract_google_drive_file_id", return_value=None), \
          patch("thoa.core.remote_inputs.track_transfer_progress", return_value={"status": "completed"}):
-        result = lt.create_mixed_dataset(specs, cwd="/home/user")
+        prepared = _import(specs, cwd="/home/user")
 
     # No upload_file_sas call (GDrive skipped), flow still started
-    assert result["dataset_public_id"] == _DATASET_ID
+    assert prepared.has_local_uploads is False
+    assert any(c.args[0].endswith("/start") for c in mock_api.post.call_args_list)
 
 
 def test_local_skipped_message_not_uploaded(capsys):
@@ -270,7 +276,7 @@ def test_local_skipped_message_not_uploaded(capsys):
     patches[4] = patch.object(lt, "upload_file_sas", upload_mock)
 
     with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7], patches[8]:
-        lt.create_mixed_dataset(specs, cwd="/home/user")
+        _import(specs, cwd="/home/user")
 
     upload_mock.assert_not_called()
     # start POST still happened
@@ -286,12 +292,11 @@ def test_failed_transfer_raises_runtime_error():
     )
     mock_api.get.side_effect = [
         {"error_message": "disk full"},  # GET /data-transfers/{id}
-        _resolved_context(),
     ]
 
     with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7], patches[8]:
         with pytest.raises(RuntimeError, match="Dataset import failed"):
-            lt.create_mixed_dataset(specs, cwd="/home/user")
+            _import(specs, cwd="/home/user")
 
 
 def test_gdrive_source_ref_forwarded_in_manifest():
@@ -307,7 +312,7 @@ def test_gdrive_source_ref_forwarded_in_manifest():
     )
 
     with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7], patches[8]:
-        lt.create_mixed_dataset(specs, cwd="/home/user")
+        _import(specs, cwd="/home/user")
 
     manifest_call = mock_api.post.call_args_list[1]
     body = manifest_call.kwargs.get("json") or manifest_call[1].get("json") or manifest_call[0][1]
@@ -328,7 +333,7 @@ def test_mount_path_spec_forwarded_for_gdrive():
     )
 
     with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7], patches[8]:
-        lt.create_mixed_dataset(specs, cwd="/home/user")
+        _import(specs, cwd="/home/user")
 
     manifest_call = mock_api.post.call_args_list[1]
     body = manifest_call.kwargs.get("json") or manifest_call[1].get("json") or manifest_call[0][1]
@@ -349,7 +354,7 @@ def test_no_gdrive_specs_sends_base_dir_not_mount_path():
     )
 
     with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7], patches[8]:
-        lt.create_mixed_dataset(specs, cwd="/home/user")
+        _import(specs, cwd="/home/user")
 
     manifest_call = mock_api.post.call_args_list[1]
     body = manifest_call.kwargs.get("json") or manifest_call[1].get("json") or manifest_call[0][1]
@@ -425,12 +430,11 @@ def test_prepare_prints_resolved_size(capsys):
 def test_track_uses_byte_progress_for_public_imports():
     prepared = lt.PreparedTransfer(transfer_id=_TRANSFER_ID, manifest={"items": [_public_manifest_item()]})
     mock_api = MagicMock()
-    mock_api.get.side_effect = [_resolved_context()]
     track = MagicMock(return_value={"status": "completed"})
     with patch.object(lt, "api_client", mock_api), patch("thoa.core.remote_inputs.track_transfer_progress", track):
-        result = lt.track_transfer(prepared)
+        lt.track_transfer(prepared)
     assert track.call_args.kwargs["by_bytes"] is True
-    assert result["dataset_public_id"] == _DATASET_ID
+    mock_api.get.assert_not_called()  # progress only: no resolved-context fetch
 
 
 def test_provider_notes_are_printed(capsys):
@@ -442,3 +446,46 @@ def test_provider_notes_are_printed(capsys):
     with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7], patches[8]:
         lt.prepare_mixed_transfer([_public_spec("GSE348257", kind="geo")], cwd="/home/user")
     assert "not available at ENA yet" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# local uploads: smallest first, under a client heartbeat
+# ---------------------------------------------------------------------------
+
+def test_local_files_upload_smallest_first():
+    """Samplesheets and configs land within seconds, so the job can stage them early."""
+    big, small = Path("/tmp/big.bam"), Path("/tmp/sheet.csv")
+    prepared = lt.PreparedTransfer(
+        transfer_id=_TRANSFER_ID,
+        manifest={"items": [
+            {**_local_manifest_item(str(big)), "item_public_id": "item-big", "size": 5_000_000},
+            {**_local_manifest_item(str(small)), "item_public_id": "item-small", "size": 120},
+        ]},
+        local_files=[big, small],
+        hashes={big: "md5-big", small: "md5-small"},
+        sizes={big: 5_000_000, small: 120},
+    )
+    upload = MagicMock()
+    with patch.object(lt, "api_client", MagicMock()), patch.object(lt, "upload_file_sas", upload):
+        lt.upload_local_items(prepared)
+    assert [c.args[0] for c in upload.call_args_list] == [small, big]
+
+
+def test_client_heartbeat_beats_at_once_and_stops_on_exit():
+    mock_api = MagicMock()
+    with patch.object(lt, "api_client", mock_api):
+        with lt.ClientHeartbeat(_TRANSFER_ID) as heartbeat:
+            mock_api.post.assert_called_once()
+            assert mock_api.post.call_args.args[0] == f"/data-transfers/{_TRANSFER_ID}/client-heartbeat"
+            # Failures are silenced: a beat must never print over the upload progress bar.
+            assert 404 in mock_api.post.call_args.kwargs["silent_status_codes"]
+        heartbeat._thread.join(timeout=1)
+    assert not heartbeat._thread.is_alive()
+
+
+def test_client_heartbeat_survives_network_errors():
+    mock_api = MagicMock()
+    mock_api.post.side_effect = OSError("network down")
+    with patch.object(lt, "api_client", mock_api):
+        with lt.ClientHeartbeat(_TRANSFER_ID):
+            pass

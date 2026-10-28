@@ -7,6 +7,7 @@ from unittest.mock import patch, MagicMock
 from typer.testing import CliRunner
 from thoa.cli import app
 from thoa.core.api_utils import StreamOutcome
+from thoa.core.local_transfer import PreparedTransfer
 
 runner = CliRunner()
 
@@ -54,14 +55,10 @@ def test_run_async_exits_after_upload(tmp_path):
     fake_job = {"public_id": "job-async-001"}
     fake_script = {"public_id": "script-001"}
     fake_env = {"public_id": "env-001"}
-    fake_dataset = {"public_id": "dataset-001"}
-    fake_file = {"public_id": "file-001", "filename": str(input_file)}
-    fake_link = {
-        "public_id": "link-001",
-        "file_public_id": "file-001",
-        "url": "https://fake.blob.core.windows.net/container/file-001?sas=xxx",
-        "client_path": str(input_file),
-    }
+    local_import = PreparedTransfer(
+        transfer_id="transfer-001",
+        manifest={"items": [{"provider": "local", "upload_required": True, "size": 5}]},
+    )
 
     def api_post_side_effect(path, **kwargs):
         if path == "/scripts":
@@ -70,10 +67,6 @@ def test_run_async_exits_after_upload(tmp_path):
             return fake_job
         if path == "/environments":
             return fake_env
-        if path == "/files":
-            return fake_file
-        if path == "/datasets":
-            return fake_dataset
         return {}
 
     def api_put_side_effect(path, **kwargs):
@@ -82,8 +75,6 @@ def test_run_async_exits_after_upload(tmp_path):
     def api_get_side_effect(path, **kwargs):
         if path == "/users/validate_job_request":
             return {"valid": True}
-        if "/temporary_links" in path or (isinstance(path, str) and "temporary_links" in path):
-            return [fake_link]
         return {}
 
     mock_api = MagicMock()
@@ -96,8 +87,11 @@ def test_run_async_exits_after_upload(tmp_path):
 
     with patch("thoa.cli.commands.run.api_client", mock_api), \
          patch("thoa.core.job_utils.api_client", mock_api), \
-         patch("thoa.cli.commands.run.upload_all") as mock_upload, \
-         patch("thoa.cli.commands.run.all_files_have_upload_links", return_value=True), \
+         patch("thoa.cli.commands.run.prepare_mixed_transfer", return_value=local_import), \
+         patch("thoa.cli.commands.run.start_transfer"), \
+         patch("thoa.cli.commands.run.upload_local_items") as mock_upload, \
+         patch("thoa.cli.commands.run.track_transfer") as mock_track, \
+         patch("thoa.cli.commands.run.ClientHeartbeat"), \
          patch("thoa.cli.commands.run.time", mock_time), \
          patch("thoa.core.resolve_environment_spec", return_value=""):
 
@@ -111,6 +105,9 @@ def test_run_async_exits_after_upload(tmp_path):
 
     assert mock_api.stream_logs_blocking.call_count == 0, \
         "stream_logs_blocking should not be called with --run-async"
+    # Returns once its own local files are up; the import and the job carry on server-side.
+    mock_upload.assert_called_once_with(local_import)
+    mock_track.assert_not_called()
     assert "job-async-001" in result.output, \
         f"Job ID should appear in output, got: {result.output}"
     assert result.exit_code == 0, \

@@ -322,7 +322,7 @@ def test_gdrive_source_ref_forwarded_in_manifest():
 
 
 def test_mount_path_spec_forwarded_for_gdrive():
-    """GDrive spec with explicit mount_path sends mount_path (not base_dir) in manifest."""
+    """GDrive spec with explicit mount_path sends it resolved against cwd (not base_dir) in manifest."""
     specs = [_gdrive_spec(mount_path="./remote-data")]
     patches, mock_api = _patch_all(
         specs=specs,
@@ -338,7 +338,7 @@ def test_mount_path_spec_forwarded_for_gdrive():
     manifest_call = mock_api.post.call_args_list[1]
     body = manifest_call.kwargs.get("json") or manifest_call[1].get("json") or manifest_call[0][1]
     gdrive_item = next(i for i in body["items"] if i.get("provider") == "google_drive")
-    assert gdrive_item.get("mount_path") == "./remote-data"
+    assert gdrive_item.get("mount_path") == "/home/user/remote-data"
     assert "base_dir" not in gdrive_item
 
 

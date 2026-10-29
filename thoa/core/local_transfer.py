@@ -144,7 +144,8 @@ def prepare_mixed_transfer(specs: List[ParsedInputSpec], cwd: str) -> PreparedTr
 
             item = {"provider": "google_drive", "source_ref": source_ref}
             if spec.mount_path:
-                item["mount_path"] = spec.mount_path
+                # Relative mount paths are relative to cwd, like local inputs.
+                item["mount_path"] = os.path.normpath(os.path.join(cwd, spec.mount_path))
             else:
                 item["base_dir"] = cwd
 

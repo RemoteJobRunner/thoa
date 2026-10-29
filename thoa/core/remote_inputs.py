@@ -1,5 +1,6 @@
 import os
 import queue
+import re
 import sys
 import threading
 import time
@@ -10,15 +11,46 @@ from urllib.parse import parse_qs, urlparse
 import typer
 from rich.progress import (
     BarColumn,
+    DownloadColumn,
     MofNCompleteColumn,
     Progress,
     TextColumn,
     TimeRemainingColumn,
+    TransferSpeedColumn,
 )
 
 from thoa.config import settings
 from thoa.core.api_utils import api_client
 from thoa.core.job_utils import console
+
+# Public-data providers, keyed by the backend provider name. The patterns only
+# route inputs to a provider; the backend re-validates every accession.
+PUBLIC_ACCESSION_PATTERNS = {
+    # INSDC reads (SRA/ENA/DDBJ): run, experiment, sample, study, BioProject, BioSample
+    "sra": re.compile(r"[SED]R[RXSP]\d{6,}|PRJ(?:NA|EB|DB)\d+|SAM(?:N|EA|D)\d+"),
+    # NCBI genome assemblies
+    "ncbi_assembly": re.compile(r"GC[AF]_\d{9}(?:\.\d+)?"),
+    # GEO series: the linked raw reads (when ENA has them)
+    "geo": re.compile(r"GSE\d+"),
+}
+PUBLIC_PROVIDERS = frozenset(PUBLIC_ACCESSION_PATTERNS)
+# Optional prefixes that force accession parsing, e.g. sra:SRR390728.
+PUBLIC_PREFIXES = {"sra": "sra", "assembly": "ncbi_assembly", "geo": "geo"}
+
+
+def parse_public_accession(value: str | None) -> tuple[str, str, bool] | None:
+    """Return (provider, ACCESSION, prefixed) for a public accession, else None."""
+    if not value:
+        return None
+    value = str(value).strip()
+    prefix, sep, rest = value.partition(":")
+    if sep and prefix.lower() in PUBLIC_PREFIXES:
+        return PUBLIC_PREFIXES[prefix.lower()], rest.strip().upper(), True
+    candidate = value.upper()
+    for provider, pattern in PUBLIC_ACCESSION_PATTERNS.items():
+        if pattern.fullmatch(candidate):
+            return provider, candidate, False
+    return None
 
 
 def detect_input_source_kind(value: str | None) -> str:
@@ -29,6 +61,9 @@ def detect_input_source_kind(value: str | None) -> str:
         return "google_drive"
     if value.startswith("s3://"):
         return "s3"
+    public = parse_public_accession(value)
+    if public:
+        return public[0]
     return "unknown"
 
 
@@ -41,16 +76,6 @@ def detect_remote_ref_kind(value: str | None) -> str:
     if value.startswith("s3://"):
         return "s3"
     return "unknown"
-
-
-def project_input_context(input_root: str, input_context: dict[str, object]) -> dict[str, object]:
-    root = input_root.rstrip("/") or "/"
-    projected = {}
-    for path, file_id in input_context.items():
-        rel_path = str(path).lstrip("/")
-        projected_path = f"{root}/{rel_path}" if root != "/" else f"/{rel_path}"
-        projected[projected_path] = file_id
-    return projected
 
 
 def extract_google_drive_folder_id(value: str) -> str | None:
@@ -268,6 +293,7 @@ def track_transfer_progress(
     label: str,
     poll_interval_seconds: float = 2.0,
     show_paths: bool = True,
+    by_bytes: bool = False,
 ) -> dict:
     """Poll a transfer's manifest until it terminates, showing a progress bar.
 
@@ -276,7 +302,13 @@ def track_transfer_progress(
     once by tracking a seen-set against the backend's ``completed_paths``
     list, so per-file lines aren't dropped when items finish in bursts.
     Returns the final manifest snapshot so the caller can render a summary.
+
+    by_bytes shows bytes and speed instead of a file count; a public import of
+    a few huge files would otherwise sit at 0/N for hours.
     """
+    if by_bytes:
+        return _track_transfer_bytes(transfer_id, label=label, poll_interval_seconds=poll_interval_seconds)
+
     seen: set[str] = set()
     task = None
     with Progress(
@@ -314,7 +346,7 @@ def track_transfer_progress(
                     )
             progress.update(task, completed=min(len(seen), importable or len(seen)))
 
-            if status in ("completed", "failed"):
+            if status in ("completed", "failed", "cancelled"):
                 if status == "completed" and importable:
                     progress.update(task, completed=importable)
                 return manifest
@@ -322,109 +354,42 @@ def track_transfer_progress(
             time.sleep(poll_interval_seconds)
 
 
-def print_manifest_summary(manifest: dict) -> None:
-    """Render the 'manifest ready' + skipped-items block.
-
-    Kept separate from ``import_google_drive_input`` so callers can position
-    it freely (e.g. after the job-configuration table) instead of having
-    it always print inline with manifest creation.
-    """
-    if not manifest:
-        return
-    total_items = manifest.get("total_items", 0)
-    skipped_count = manifest.get("skipped_items", 0)
-    importable = total_items - skipped_count
-    console.print(
-        f"[green]Google Drive manifest ready:[/green] "
-        f"{importable} importable item(s), {manifest.get('total_bytes', 0)} bytes"
-    )
-    if skipped_count:
-        console.print(
-            f"[yellow]Skipping {skipped_count} unsupported item(s):[/yellow]"
-        )
-        samples = manifest.get("skipped_samples", [])
-        for sample in samples:
-            console.print(
-                f"  [dim]- {sample['path']} "
-                f"({sample.get('mime_type') or 'unknown type'})[/dim]"
+def _track_transfer_bytes(transfer_id: str, *, label: str, poll_interval_seconds: float) -> dict:
+    seen: set[str] = set()
+    task = None
+    with Progress(
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        DownloadColumn(),
+        TextColumn("•"),
+        TransferSpeedColumn(),
+        TextColumn("•"),
+        TimeRemainingColumn(),
+        console=console,
+    ) as progress:
+        while True:
+            manifest = api_client.get(
+                f"/data-transfers/{transfer_id}/manifest",
+                silent_status_codes={404},
             )
-        if len(samples) < skipped_count:
-            console.print(
-                f"  [dim]... and {skipped_count - len(samples)} more[/dim]"
-            )
+            if not manifest:
+                time.sleep(poll_interval_seconds)
+                continue
 
+            total = manifest.get("total_bytes") or 0
+            done = (manifest.get("completed_bytes") or 0) + (manifest.get("in_progress_bytes") or 0)
+            if task is None:
+                task = progress.add_task(label, total=total or None)
 
-def import_google_drive_input(
-    source_url: str,
-    *,
-    retain_credential_for_export: bool = False,
-    defer_execution: bool = False,
-) -> dict[str, object]:
-    folder_id = extract_google_drive_folder_id(source_url)
-    file_id = None if folder_id else extract_google_drive_file_id(source_url)
-    if not folder_id and not file_id:
-        console.print("[bold red]Invalid Google Drive URL.[/bold red]")
-        raise typer.Exit(code=1)
+            for path in manifest.get("completed_paths", []):
+                if path not in seen:
+                    seen.add(path)
+                    progress.console.log(f"[{len(seen)}/{manifest.get('total_items', len(seen))}] {path}")
+            progress.update(task, completed=min(done, total) if total else done)
 
-    remote_ref: dict[str, object] = {"provider": "google_drive"}
-    if folder_id:
-        remote_ref["folder_id"] = folder_id
-    else:
-        remote_ref["file_id"] = file_id
+            if manifest.get("status") in ("completed", "failed", "cancelled"):
+                if manifest.get("status") == "completed" and total:
+                    progress.update(task, completed=total)
+                return manifest
 
-    transfer = api_client.post(
-        "/data-transfers",
-        json={
-            "provider": "google_drive",
-            "direction": "import",
-            "remote_ref": remote_ref,
-            "retain_credential_for_export": retain_credential_for_export,
-        },
-    )
-    if not transfer:
-        raise typer.Exit(code=1)
-
-    transfer_id = transfer["public_id"]
-    auth_complete = authorize_google_drive_transfer(transfer_id)
-    if not auth_complete:
-        raise typer.Exit(code=1)
-
-    manifest_status = api_client.post(f"/data-transfers/{transfer_id}/manifest")
-    if not manifest_status:
-        raise typer.Exit(code=1)
-
-    manifest = api_client.get(f"/data-transfers/{transfer_id}/manifest")
-
-    if defer_execution:
-        return {
-            "transfer_public_id": transfer_id,
-            "status": manifest_status.get("status"),
-            "manifest": manifest,
-        }
-
-    start_status = api_client.post(f"/data-transfers/{transfer_id}/start")
-    if not start_status:
-        raise typer.Exit(code=1)
-
-    final = track_transfer_progress(transfer_id, label="Importing Google Drive data")
-
-    if final.get("status") == "failed":
-        status_blob = api_client.get(f"/data-transfers/{transfer_id}")
-        error = (status_blob or {}).get("error_message") or "unknown error"
-        console.print(f"[bold red]Google Drive import failed:[/bold red] {error}")
-        raise typer.Exit(code=1)
-
-    console.print(
-        f"[green]Imported {final.get('completed_items', 0)} file(s), "
-        f"{final.get('completed_bytes', 0)} bytes "
-        f"(skipped {final.get('skipped_items', 0)})[/green]"
-    )
-
-    resolved = api_client.get(f"/data-transfers/{transfer_id}/resolved-context")
-    if not resolved:
-        raise typer.Exit(code=1)
-    dataset_public_id = resolved.get("dataset_public_id")
-    if not dataset_public_id:
-        console.print("[bold red]Transfer completed without dataset id.[/bold red]")
-        raise typer.Exit(code=1)
-    return resolved
+            time.sleep(poll_interval_seconds)

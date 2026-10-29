@@ -31,20 +31,25 @@ from thoa.core.job_utils import (
     hash_all,
     file_sizes_in_bytes,
     current_job_status,
-    all_files_have_upload_links,
-    upload_all,
     max_threads,
     console
 )
-from thoa.core.input_specs import parse_input_spec
+from thoa.core.input_specs import InputSpecError, parse_input_spec
 from thoa.core.remote_inputs import (
     authorize_google_drive_transfer,
     detect_input_source_kind,
     detect_remote_ref_kind,
     extract_google_drive_folder_id,
     track_transfer_progress,
+    PUBLIC_PROVIDERS,
 )
-from thoa.core.local_transfer import create_mixed_dataset
+from thoa.core.local_transfer import (
+    ClientHeartbeat,
+    prepare_mixed_transfer,
+    start_transfer,
+    track_transfer,
+    upload_local_items,
+)
 from thoa.core.job_status import JobStatus, UPLOAD_STATUSES, TERMINAL_STATUSES, CRASHED_MESSAGE
 
 max_threads = min(32, os.cpu_count() * 2)
@@ -202,9 +207,15 @@ def run_cmd(
     # - local --input remains unchanged
     # - Google Drive input moves from --input-source to --input <url>::<mount_path>
     # - dataset ids intentionally stay on --input-dataset
-    parsed_inputs = [parse_input_spec(raw) for raw in (inputs or [])]
+    try:
+        parsed_inputs = [parse_input_spec(raw) for raw in (inputs or [])]
+    except InputSpecError as exc:
+        console.print(f"[bold red]Error:[/bold red] {exc}")
+        raise typer.Exit(code=1)
     local_specs = [spec for spec in parsed_inputs if spec.kind == "local"]
     remote_specs = [spec for spec in parsed_inputs if spec.kind == "google_drive"]
+    # Public accessions (SRR…, PRJNA…, GCF_…) are fetched server-side.
+    public_specs = [spec for spec in parsed_inputs if spec.kind in PUBLIC_PROVIDERS]
     unknown_specs = [spec for spec in parsed_inputs if spec.kind == "unknown"]
 
     if unknown_specs:
@@ -214,11 +225,8 @@ def run_cmd(
         )
         raise typer.Exit(code=1)
 
-    remote_input_context = None
     export_remote_ref = None
-    import_transfer_public_id = None
     export_transfer_public_id = None
-    input_root = None
 
     if export_to:
         export_kind = detect_remote_ref_kind(export_to)
@@ -248,7 +256,7 @@ def run_cmd(
             console.print("[bold red]Error:[/bold red] Unsupported remote --input value.")
             raise typer.Exit(code=1)
 
-    if remote_specs and input_dataset:
+    if (remote_specs or public_specs) and input_dataset:
         console.print(
             "[bold red]Error:[/bold red] Cannot combine --input-dataset with remote --input."
         )
@@ -260,8 +268,6 @@ def run_cmd(
             "direction": "export",
             "remote_ref": export_remote_ref,
         }
-        if import_transfer_public_id:
-            export_payload["credential_transfer_public_id"] = import_transfer_public_id
 
         export_transfer = api_client.post(
             "/data-transfers",
@@ -326,7 +332,7 @@ def run_cmd(
         pass
 
     print_config(
-        inputs=inputs,
+        inputs=inputs + [f"{spec.source} ({spec.kind})" for spec in public_specs],
         input_dataset=input_dataset,
         output=output,
         n_cores=n_cores,
@@ -376,6 +382,11 @@ def run_cmd(
             "/azure_prices/estimate",
             params={"n_cores": n_cores, "ram": ram, "limit": 10}
         )
+        if public_specs:
+            console.print(
+                "[yellow]Public accessions are resolved when the job is submitted; "
+                "their files are not included in the size below.[/yellow]"
+            )
 
         _print_dry_run_summary(
             n_files=n_files,
@@ -413,6 +424,12 @@ def run_cmd(
                 console.print("[bold red]Failed to create environment. Please check your configuration.[/bold red]")
                 raise typer.Exit(code=1)
 
+    # Hash local files, authorize Drive, resolve accessions and build the manifest
+    # (which creates the job's dataset) before any job exists: bad inputs, path
+    # collisions and quota problems fail without leaving a job behind.
+    prepared = None
+    if parsed_inputs:
+        prepared = prepare_mixed_transfer(parsed_inputs, cwd=os.getcwd())
 
     # STEP 2: Create the script and the job
     submit_console = get_console()
@@ -438,9 +455,8 @@ def run_cmd(
             "has_input_data": has_input_data,
             "client_home": client_home,
             "use_existing_input_dataset": use_existing_input_dataset,
-            "import_transfer_public_id": import_transfer_public_id,
+            "input_transfer_public_id": prepared.transfer_id if prepared else None,
             "export_transfer_public_id": export_transfer_public_id,
-            "input_mount_root": input_root,
             "strict": strict,
             "max_attempts": max_attempts,
             "disable_preflight": disable_preflight,
@@ -461,11 +477,7 @@ def run_cmd(
 
         if input_dataset:
             job_update_payload["input_dataset_public_id"] = input_dataset
-            job_update_payload["input_context"] = (
-                remote_input_context
-                if remote_input_context is not None
-                else input_dataset_response.get("adjusted_context", {})
-            )
+            job_update_payload["input_context"] = input_dataset_response.get("adjusted_context", {})
 
         updated_job_response = api_client.put(
             f"/jobs/{job_response['public_id']}",
@@ -509,62 +521,74 @@ def run_cmd(
     validation_thread.start()
 
 
-    # STEP 4: Hash the file objects and create them on the server, as well as the input dataset object
-    # No inputs provided at all
+    # STEP 4: Bring the inputs in. The job already holds the import's dataset and its
+    # flow stages each file as soon as it lands, so nothing here waits for the import.
     if not input_dataset and not parsed_inputs:
         console.print("[yellow]No input files specified. Skipping input upload.[/yellow]")
-        new_input_dataset = None
-        names_to_public_ids = {}
 
     elif input_dataset:
         console.print(f"[green]Using dataset {input_dataset} as job input.[/green]")
         console.print("[yellow]Using existing input dataset. Files will be staged under:[/yellow]")
         rel_paths = list(input_dataset_response.get("adjusted_context", {}).keys())
         _print_staged_paths(rel_paths)
-        new_input_dataset = None
-        names_to_public_ids = {}
 
-    elif parsed_inputs:
+    else:
+        job_public_id = job_response['public_id']
         try:
-            _ds = create_mixed_dataset(parsed_inputs, cwd=os.getcwd())
+            # Server-side copies (Drive, public accessions) start at once, alongside the local uploads.
+            if prepared.has_local_uploads:
+                # Only this CLI can upload them; the heartbeat lets the server tell if it goes away.
+                with ClientHeartbeat(prepared.transfer_id):
+                    start_transfer(prepared)
+                    upload_local_items(prepared)
+            else:
+                start_transfer(prepared)
         except BaseException:
-            # Input prep failed after the job (and its flow, which is now
-            # waiting on this input dataset) was already created. Cancel it
-            # rather than leaving the flow waiting forever.
-            api_client.post(f"/jobs/{job_response['public_id']}/cancel", silent_status_codes={400})
+            # The job can't run without its inputs. A failed cancel must not hide the real
+            # error; without its heartbeat the server fails the job within minutes anyway.
+            try:
+                api_client.post(f"/jobs/{job_public_id}/cancel", silent_status_codes={400})
+            except Exception:
+                console.print(
+                    f"[yellow]Could not cancel job {job_public_id}. "
+                    f"Run [bold]thoa jobs cancel {job_public_id}[/bold] to stop it.[/yellow]"
+                )
             raise
-        new_input_dataset = {"public_id": _ds["dataset_public_id"]}
-        names_to_public_ids = _ds["input_context"]
-
-    # Only update if we have an input dataset
-    if new_input_dataset:
-        with console.status("Attaching dataset to job...", spinner="dots12"):
-            updated_job_response = api_client.put(
-                f"/jobs/{job_response['public_id']}",
-                json={
-                    "input_dataset_public_id": new_input_dataset["public_id"],
-                    "input_context": names_to_public_ids
-                }
-            )
-
-    if new_input_dataset:
-        with console.status("Waiting for dataset to be ready", spinner="dots12"):
-            while current_job_status(updated_job_response['public_id']) in UPLOAD_STATUSES:
-                time.sleep(4)
 
         if run_async:
             console.print(Panel(
                 f"[bold green]Job submitted successfully![/bold green]\n\n"
-                f"[label]Job ID:[/label]    [value]{job_response['public_id']}[/value]\n"
-                f"[label]Status:[/label]    [value]{current_job_status(updated_job_response['public_id'])}[/value]\n"
-                f"[label]View:[/label]      [value]{settings.THOA_UI_URL}/workbench/jobs/{job_response['public_id']}[/value]\n"
-                f"[label]Attach:[/label]    [value]thoa jobs attach {job_response['public_id']}[/value]\n"
-                f"[label]Cancel:[/label]    [value]thoa jobs cancel {job_response['public_id']}[/value]",
+                f"Remaining inputs import server-side; the job stages each file as it arrives.\n\n"
+                f"[label]Job ID:[/label]    [value]{job_public_id}[/value]\n"
+                f"[label]View:[/label]      [value]{settings.THOA_UI_URL}/workbench/jobs/{job_public_id}[/value]\n"
+                f"[label]Attach:[/label]    [value]thoa jobs attach {job_public_id}[/value]\n"
+                f"[label]Cancel:[/label]    [value]thoa jobs cancel {job_public_id}[/value]",
                 title="[title]Job Submitted (async)[/title]",
                 expand=False,
                 border_style="green"
             ))
             return
+
+        try:
+            track_transfer(prepared)
+        except KeyboardInterrupt:
+            # Every local file is uploaded by now, so the import and the job carry on without us.
+            console.print(
+                "\n[yellow]Detached. The import keeps running server-side and the job stages "
+                "each file as it arrives.[/yellow]\n"
+                f"  Follow: [bold]thoa jobs attach {job_public_id}[/bold]\n"
+                f"  Cancel: [bold]thoa jobs cancel {job_public_id}[/bold]"
+            )
+            return
+        except RuntimeError as exc:
+            # The backend already failed the job along with its import.
+            console.print(f"[bold red]{exc}[/bold red]")
+            raise typer.Exit(code=1)
+
+    if prepared is not None:
+        with console.status("Waiting for your job to start", spinner="dots12"):
+            while current_job_status(updated_job_response['public_id']) in UPLOAD_STATUSES:
+                time.sleep(4)
 
         with console.status(f"Validating your environment", spinner="dots12"):
             while current_job_status(updated_job_response['public_id']) == JobStatus.VALIDATING:
@@ -579,7 +603,7 @@ def run_cmd(
             while current_job_status(updated_job_response['public_id']) == JobStatus.STAGING:
                 time.sleep(4)
 
-    if input_dataset and not new_input_dataset:
+    if input_dataset:
         with console.status(f"Queuing your job", spinner="dots12"):
             while current_job_status(updated_job_response['public_id']) in {JobStatus.CREATED, JobStatus.QUEUED}:
                 time.sleep(4)
@@ -596,7 +620,7 @@ def run_cmd(
             while current_job_status(updated_job_response['public_id']) == JobStatus.STAGING:
                 time.sleep(4)
 
-    if not new_input_dataset and not input_dataset:
+    if prepared is None and not input_dataset:
         with console.status(f"Queuing your job", spinner="dots12"):
             while current_job_status(updated_job_response['public_id']) in {JobStatus.CREATED, JobStatus.QUEUED}:
                 time.sleep(4)

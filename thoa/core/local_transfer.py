@@ -258,7 +258,7 @@ def upload_local_items(prepared: PreparedTransfer) -> None:
                 console.print(f"[bold red]Error:[/bold red] Cannot find local file: {item['path']}")
                 raise SystemExit(1)
             upload_file_sas(local_path, item["upload_url"], prepared.hashes[local_path])
-            api_client.post(
+            completed = api_client.post(
                 f"/data-transfers/{prepared.transfer_id}/import/items/{item['item_public_id']}/complete",
                 json={
                     "filename": item["path"],
@@ -266,6 +266,11 @@ def upload_local_items(prepared: PreparedTransfer) -> None:
                     "size": prepared.sizes[local_path],
                 },
             )
+            if completed is None:
+                # The server rejected the file (its error is printed above), so the
+                # job must not run with it: stopping here cancels the job.
+                console.print(f"[bold red]Error:[/bold red] Upload of {item['path']} was not accepted.")
+                raise SystemExit(1)
             progress.advance(task)
 
 

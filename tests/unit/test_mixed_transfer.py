@@ -471,6 +471,23 @@ def test_local_files_upload_smallest_first():
     assert [c.args[0] for c in upload.call_args_list] == [small, big]
 
 
+def test_rejected_local_upload_stops_the_cli():
+    """A failed /complete must stop the run (which cancels the job), not be skipped."""
+    path = Path("/tmp/sheet.csv")
+    prepared = lt.PreparedTransfer(
+        transfer_id=_TRANSFER_ID,
+        manifest={"items": [{**_local_manifest_item(str(path)), "item_public_id": "item-a", "size": 120}]},
+        local_files=[path],
+        hashes={path: "md5-a"},
+        sizes={path: 120},
+    )
+    mock_api = MagicMock()
+    mock_api.post.return_value = None  # api_client's result for any non-200 response
+    with patch.object(lt, "api_client", mock_api), patch.object(lt, "upload_file_sas", MagicMock()):
+        with pytest.raises(SystemExit):
+            lt.upload_local_items(prepared)
+
+
 def test_client_heartbeat_beats_at_once_and_stops_on_exit():
     mock_api = MagicMock()
     with patch.object(lt, "api_client", mock_api):

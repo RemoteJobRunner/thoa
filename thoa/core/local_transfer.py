@@ -15,6 +15,29 @@ from thoa.core.job_utils import (
 )
 
 
+# Must match DISK_BUFFER_GB in the backend's job_submission_flow disk check.
+DISK_BUFFER_GB = 1
+DISK_WARN_FRACTION = 0.75
+
+
+def check_dataset_fits_disk(total_bytes: int, storage_gb: int) -> None:
+    """Exit if the dataset leaves under DISK_BUFFER_GB of headroom; warn above DISK_WARN_FRACTION."""
+    disk_bytes = storage_gb * (1024 ** 3)
+    size_gb = total_bytes / (1024 ** 3)
+    if total_bytes + DISK_BUFFER_GB * (1024 ** 3) > disk_bytes:
+        console.print(
+            f"[bold red]Error:[/bold red] Input data ({size_gb:.1f} GB) leaves less than "
+            f"{DISK_BUFFER_GB} GB of headroom on the requested disk space ({storage_gb} GB). "
+            f"Re-run with --storage {int(size_gb) + DISK_BUFFER_GB + 1} or larger."
+        )
+        raise SystemExit(1)
+    if total_bytes > DISK_WARN_FRACTION * disk_bytes:
+        console.print(
+            f"[yellow]Warning: you requested a {storage_gb} GB disk and your input data is "
+            f"{size_gb:.1f} GB. The disk may fill up during the job; consider a larger --storage.[/yellow]"
+        )
+
+
 def create_mixed_dataset(specs: List[ParsedInputSpec], cwd: str) -> dict:
     """Upload a mixed set of local and Google Drive inputs as a single dataset.
 

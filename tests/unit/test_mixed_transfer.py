@@ -356,3 +356,39 @@ def test_no_gdrive_specs_sends_base_dir_not_mount_path():
     gdrive_item = next(i for i in body["items"] if i.get("provider") == "google_drive")
     assert gdrive_item.get("base_dir") == "/home/user"
     assert "mount_path" not in gdrive_item
+
+
+_GB = 1024 ** 3
+
+
+@pytest.mark.parametrize(
+    "total_gb, storage_gb, exits",
+    [
+        (1.0, 2, False),   # exactly 1 GB headroom: allowed (backend uses strict >)
+        (1.01, 2, True),   # just under 1 GB headroom
+        (2.0, 2, True),    # dataset == disk
+        (0, 1, False),     # empty dataset, minimum disk
+    ],
+)
+def test_check_dataset_fits_disk_buffer_boundary(total_gb, storage_gb, exits):
+    with patch.object(lt, "console", MagicMock()):
+        if exits:
+            with pytest.raises(SystemExit):
+                lt.check_dataset_fits_disk(int(total_gb * _GB), storage_gb)
+        else:
+            lt.check_dataset_fits_disk(int(total_gb * _GB), storage_gb)
+
+
+def test_check_dataset_fits_disk_warns_over_fraction():
+    """8 GB on a 10 GB disk: above 75% but within the buffer, so warn and continue."""
+    console_mock = MagicMock()
+    with patch.object(lt, "console", console_mock):
+        lt.check_dataset_fits_disk(8 * _GB, 10)
+    assert any("may fill up" in str(c) for c in console_mock.print.call_args_list)
+
+
+def test_check_dataset_fits_disk_no_warning_when_small():
+    console_mock = MagicMock()
+    with patch.object(lt, "console", console_mock):
+        lt.check_dataset_fits_disk(1 * _GB, 10)
+    assert not console_mock.print.called

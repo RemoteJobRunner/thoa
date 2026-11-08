@@ -45,6 +45,7 @@ from thoa.core.remote_inputs import (
 )
 from thoa.core.local_transfer import (
     ClientHeartbeat,
+    check_dataset_fits_disk,
     prepare_mixed_transfer,
     start_transfer,
     track_transfer,
@@ -308,15 +309,7 @@ def run_cmd(
             console.print("[bold red]Error:[/bold red] Dataset upload is still in progress and cannot be used as input yet.")
             raise typer.Exit(code=1)
 
-        dataset_size_bytes = input_dataset_response.get("total_size") or 0
-        disk_size_bytes = storage * (1024 ** 3)
-        if dataset_size_bytes > disk_size_bytes:
-            size_gb = dataset_size_bytes / (1024 ** 3)
-            console.print(
-                f"[bold red]Error:[/bold red] Dataset size ({size_gb:.1f} GB) exceeds "
-                f"requested disk space ({storage} GB). Re-run with --storage {int(size_gb) + 1} or larger."
-            )
-            raise typer.Exit(code=1)
+        check_dataset_fits_disk(input_dataset_response.get("total_size") or 0, storage)
 
     elif inputs:
         all_files = collect_files(inputs)
@@ -328,7 +321,11 @@ def run_cmd(
             )
             raise typer.Exit(code=1)
 
-    else: 
+        # Local files only: Drive and public sizes aren't known until the manifest, so
+        # POST /jobs checks the full total there.
+        check_dataset_fits_disk(sum(file_sizes_in_bytes(all_files).values()), storage)
+
+    else:
         pass
 
     print_config(

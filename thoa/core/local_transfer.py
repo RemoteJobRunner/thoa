@@ -18,6 +18,30 @@ from thoa.core.job_utils import (
 from thoa.core.remote_inputs import PUBLIC_PROVIDERS
 
 
+# Must match the backend's disk checks (DISK_BUFFER_BYTES in job_service's
+# POST /jobs check, DISK_BUFFER_GB in job_submission_flow).
+DISK_BUFFER_GB = 1
+DISK_WARN_FRACTION = 0.75
+
+
+def check_dataset_fits_disk(total_bytes: int, storage_gb: int) -> None:
+    """Exit if the dataset leaves under DISK_BUFFER_GB of headroom; warn above DISK_WARN_FRACTION."""
+    disk_bytes = storage_gb * (1024 ** 3)
+    size_gb = total_bytes / (1024 ** 3)
+    if total_bytes + DISK_BUFFER_GB * (1024 ** 3) > disk_bytes:
+        console.print(
+            f"[bold red]Error:[/bold red] Input data ({size_gb:.1f} GB) leaves less than "
+            f"{DISK_BUFFER_GB} GB of headroom on the requested disk space ({storage_gb} GB). "
+            f"Re-run with --storage {int(size_gb) + DISK_BUFFER_GB + 1} or larger."
+        )
+        raise SystemExit(1)
+    if total_bytes > DISK_WARN_FRACTION * disk_bytes:
+        console.print(
+            f"[yellow]Warning: you requested a {storage_gb} GB disk and your input data is "
+            f"{size_gb:.1f} GB. The disk may fill up during the job; consider a larger --storage.[/yellow]"
+        )
+
+
 @dataclass
 class PreparedTransfer:
     """An import transfer whose manifest exists but whose data hasn't moved yet."""

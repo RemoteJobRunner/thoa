@@ -186,22 +186,6 @@ def current_job_status(job_id: str):
     return response.get("status", "unknown")
 
 
-def all_files_have_upload_links(job_id, input_dataset_id, file_public_ids):
-    """Check if all files in the job have upload links."""
-    
-    links = api_client.get(
-        f"/temporary_links", 
-        params={
-            "job_public_id": job_id,
-            "dataset_public_id": input_dataset_id,
-            "link_type": "upload"
-        }
-    )
-
-    link_file_ids = {link['file_public_id'] for link in links}
-    return set(file_public_ids).issubset(set(link_file_ids))
-
-
 def upload_file_sas(local_path: Path, sas_url: str, local_md5: str, max_concurrency: int = 4):
     """
     Upload a file to Azure Blob Storage using a pre-signed SAS URL.
@@ -224,65 +208,6 @@ def upload_file_sas(local_path: Path, sas_url: str, local_md5: str, max_concurre
         print(f"[ERROR] Failed to upload {local_path.name}: {e}")
         raise
 
-
-def upload_all(upload_links, local_file_map, all_md5s, max_workers=4):
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = []
-
-        for link in upload_links:
-            file_id = link["file_public_id"]
-            local_path = Path(local_file_map.get(file_id))
-            local_md5 = all_md5s.get(file_id)
-
-            if not local_path.exists():
-                print(f"[WARN] File missing: {file_id} -> {local_path}")
-                continue
-
-            # Skip upload if hash already matches
-            if blob_exists_with_same_md5(link["url"], local_md5, local_path):
-                print(f"[SKIP] {local_path.name} already uploaded with matching MD5")
-                continue
-
-            futures.append(executor.submit(upload_file_sas, local_path, link["url"], local_md5))
-
-        for future in concurrent.futures.as_completed(futures):
-            try:
-                future.result()
-            except Exception:
-                pass 
-
-
-def blob_exists_with_same_md5(sas_url: str, local_md5: str, local_path: Path | None = None) -> bool:
-    # if we don't know local hash, we cannot prove anything -> do not skip
-    if not local_md5:
-        return False
-
-    try:
-        blob_client = BlobClient.from_blob_url(sas_url)
-        props = blob_client.get_blob_properties()
-
-        # optional but great: size guard
-        if local_path is not None:
-            local_size = local_path.stat().st_size
-            remote_size = getattr(props, "size", None) or getattr(props, "content_length", None)
-            if remote_size is None or int(remote_size) != int(local_size):
-                return False
-
-        md = props.metadata or {}
-        remote_md5 = md.get("md5")
-               
-        if md.get("upload") != "complete":
-            return False
-
-        if remote_md5:
-            return remote_md5 == local_md5
-
-        # No usable checksum on the blob -> cannot prove match
-        return False
-
-    except Exception:
-        return False
-    
 
 # Timestamp helpers
 def _parse_job_timestamp(ts: str):

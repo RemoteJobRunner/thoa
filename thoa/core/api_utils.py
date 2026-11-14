@@ -7,6 +7,11 @@ from enum import Enum
 from rich.console import Console
 from rich.text import Text
 from thoa.core.version_check import current_version
+from thoa.core.reconnect import (
+    JobReconnector,
+    TRANSIENT_STATUS_CODES,
+    TransientServerError,
+)
 
 
 console = Console()
@@ -69,6 +74,9 @@ class ApiClient:
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.timeout = timeout
+        # Set while following a job that keeps running without us; transient
+        # failures are then retried instead of surfacing (see reconnect.py).
+        self.reconnector: Optional[JobReconnector] = None
         self.client = httpx.Client(
             base_url=self.base_url,
             headers={
@@ -94,7 +102,23 @@ class ApiClient:
             return
 
         api_path = f"/api{path}"
-        response = self.client.request(method, api_path, **kwargs)
+        reconnector = self.reconnector
+
+        def send():
+            response = self.client.request(method, api_path, **kwargs)
+            if reconnector is not None and response.status_code in TRANSIENT_STATUS_CODES:
+                raise TransientServerError(response.status_code)
+            return response
+
+        if reconnector is not None:
+            try:
+                response = reconnector.call(send)
+            except TransientServerError as exc:
+                # Off the main thread nothing retries; report it as before.
+                ErrorReadouts(exc.status_code).readout()
+                return
+        else:
+            response = send()
 
         if response.status_code == 200:
             if settings.THOA_API_DEBUG:
@@ -199,7 +223,7 @@ class ApiClient:
                         console.print(f"[orange3][remote stderr][/orange3] {data}", end="")
                     else:
                         console.print(f"[blue][remote stdout][/blue] {data}", end="")
-        except (OSError, websockets.exceptions.WebSocketException) as e:
+        except (OSError, asyncio.TimeoutError, websockets.exceptions.WebSocketException) as e:
             console.print(f"[yellow]Live log stream unavailable:[/yellow] {e}")
             return StreamOutcome.UNAVAILABLE
 

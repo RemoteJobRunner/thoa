@@ -52,6 +52,7 @@ from thoa.core.local_transfer import (
     upload_local_items,
 )
 from thoa.core.job_status import JobStatus, UPLOAD_STATUSES, TERMINAL_STATUSES, CRASHED_MESSAGE
+from thoa.core.reconnect import JobReconnector
 
 max_threads = min(32, os.cpu_count() * 2)
 
@@ -100,7 +101,7 @@ def _handle_validation_failure(job_public_id: str) -> bool:
     _print_env_build_failure(job_public_id)
 
     # Wait up to 20 s for the flow to set the status to RETRYING (hook fires quickly)
-    with console.status("Waiting for AI to analyze the environment failure...", spinner="dots12"):
+    with _status("Waiting for AI to analyze the environment failure..."):
         deadline = time.time() + 20
         while time.time() < deadline:
             time.sleep(3)
@@ -119,7 +120,7 @@ def _handle_validation_failure(job_public_id: str) -> bool:
 
     console.print("[yellow]AI is retrying with a corrected environment...[/yellow]")
 
-    with console.status("Re-validating corrected environment...", spinner="dots12"):
+    with _status("Re-validating corrected environment..."):
         while current_job_status(job_public_id) in {
             JobStatus.VALIDATING, JobStatus.QUEUED, JobStatus.PENDING, JobStatus.CREATED,
             JobStatus.STAGING, JobStatus.PROVISIONING,
@@ -177,7 +178,27 @@ def _print_dry_run_summary(
     console.print("[yellow]Dry run complete. No job was submitted.[/yellow]")
 
 
-def run_cmd(
+def _status(message: str):
+    """Spinner that the reconnect handler can re-label while following a job."""
+    reconnector = getattr(api_client, "reconnector", None)
+    if isinstance(reconnector, JobReconnector):
+        return reconnector.status(message)
+    return console.status(message, spinner="dots12")
+
+
+def _follow_job(job_public_id: str) -> None:
+    api_client.reconnector = JobReconnector(job_public_id, console)
+
+
+def run_cmd(*args, **kwargs):
+    try:
+        return _run_job(*args, **kwargs)
+    finally:
+        # Never leak retry-forever behavior into later commands or tests.
+        api_client.reconnector = None
+
+
+def _run_job(
     inputs: Optional[List[str]] = None,
     input_dataset: Optional[str] = None,
     export_to: Optional[str] = None,
@@ -520,14 +541,19 @@ def run_cmd(
 
     # STEP 4: Bring the inputs in. The job already holds the import's dataset and its
     # flow stages each file as soon as it lands, so nothing here waits for the import.
+    # Once the inputs are in (or the server is importing the rest on its own),
+    # the job keeps running on the backend without us, so _follow_job makes
+    # the rest of the run ride out dropped connections instead of crashing.
     if not input_dataset and not parsed_inputs:
         console.print("[yellow]No input files specified. Skipping input upload.[/yellow]")
+        _follow_job(job_response['public_id'])
 
     elif input_dataset:
         console.print(f"[green]Using dataset {input_dataset} as job input.[/green]")
         console.print("[yellow]Using existing input dataset. Files will be staged under:[/yellow]")
         rel_paths = list(input_dataset_response.get("adjusted_context", {}).keys())
         _print_staged_paths(rel_paths)
+        _follow_job(job_response['public_id'])
 
     else:
         job_public_id = job_response['public_id']
@@ -551,6 +577,9 @@ def run_cmd(
                     f"Run [bold]thoa jobs cancel {job_public_id}[/bold] to stop it.[/yellow]"
                 )
             raise
+
+        # Local uploads are done; the import and the job carry on without us.
+        _follow_job(job_public_id)
 
         if run_async:
             console.print(Panel(
@@ -577,17 +606,20 @@ def run_cmd(
                 f"  Cancel: [bold]thoa jobs cancel {job_public_id}[/bold]"
             )
             return
+        except typer.Exit:
+            # Gave up reconnecting (typer.Exit is a RuntimeError); already explained.
+            raise
         except RuntimeError as exc:
             # The backend already failed the job along with its import.
             console.print(f"[bold red]{exc}[/bold red]")
             raise typer.Exit(code=1)
 
     if prepared is not None:
-        with console.status("Waiting for your job to start", spinner="dots12"):
+        with _status("Waiting for your job to start"):
             while current_job_status(updated_job_response['public_id']) in UPLOAD_STATUSES:
                 time.sleep(4)
 
-        with console.status(f"Validating your environment", spinner="dots12"):
+        with _status(f"Validating your environment"):
             while current_job_status(updated_job_response['public_id']) == JobStatus.VALIDATING:
                 time.sleep(4)
 
@@ -596,16 +628,16 @@ def run_cmd(
                 raise typer.Exit(code=1)
 
         # STEP 8: Poll the server for disk creation and copy status
-        with console.status(f"Staging your files", spinner="dots12"):
+        with _status(f"Staging your files"):
             while current_job_status(updated_job_response['public_id']) == JobStatus.STAGING:
                 time.sleep(4)
 
     if input_dataset:
-        with console.status(f"Queuing your job", spinner="dots12"):
+        with _status(f"Queuing your job"):
             while current_job_status(updated_job_response['public_id']) in {JobStatus.CREATED, JobStatus.QUEUED}:
                 time.sleep(4)
 
-        with console.status(f"Validating your environment", spinner="dots12"):
+        with _status(f"Validating your environment"):
             while current_job_status(updated_job_response['public_id']) == JobStatus.VALIDATING:
                 time.sleep(4)
 
@@ -613,16 +645,16 @@ def run_cmd(
             if not _handle_validation_failure(updated_job_response['public_id']):
                 raise typer.Exit(code=1)
 
-        with console.status(f"Staging your data", spinner="dots12"):
+        with _status(f"Staging your data"):
             while current_job_status(updated_job_response['public_id']) == JobStatus.STAGING:
                 time.sleep(4)
 
     if prepared is None and not input_dataset:
-        with console.status(f"Queuing your job", spinner="dots12"):
+        with _status(f"Queuing your job"):
             while current_job_status(updated_job_response['public_id']) in {JobStatus.CREATED, JobStatus.QUEUED}:
                 time.sleep(4)
 
-        with console.status(f"Validating your environment", spinner="dots12"):
+        with _status(f"Validating your environment"):
             while current_job_status(updated_job_response['public_id']) == JobStatus.VALIDATING:
                 time.sleep(4)
 
@@ -643,7 +675,7 @@ def run_cmd(
         return
 
     # STEP 9: Poll until the VM has been provisioned
-    with console.status(f"Spawning a Virtual Machine for your job", spinner="dots12"):
+    with _status(f"Spawning a Virtual Machine for your job"):
         while current_job_status(updated_job_response['public_id']) == JobStatus.PROVISIONING:
             time.sleep(4)
 
@@ -652,7 +684,7 @@ def run_cmd(
             raise typer.Exit(code=1)
 
     # STEP 11: Wait until the VM is ready to stream logs, then connect
-    with console.status(f"Connecting to your job VM", spinner="dots12"):
+    with _status(f"Connecting to your job VM"):
         while current_job_status(updated_job_response['public_id']) not in {
             JobStatus.RUNNING, JobStatus.COMPLETED, JobStatus.FAILED_EXECUTION,
             JobStatus.FAILED_STARTUP, JobStatus.CRASHED, JobStatus.CANCELLED, JobStatus.FAILED_VALIDATION
@@ -673,7 +705,7 @@ def run_cmd(
 
     def _poll_attempt_outcome(attempt_public_id: str) -> StreamOutcome:
         """Follow an attempt to its end when live logs are unavailable."""
-        with console.status("Following job status instead", spinner="dots12"):
+        with _status("Following job status instead"):
             while True:
                 attempt_data = api_client.get(f"/attempts/{attempt_public_id}") or {}
                 status = attempt_data.get("status")
@@ -739,7 +771,7 @@ def run_cmd(
                 console.print(f"\n[yellow]AI retry — Attempt {n}:[/yellow] {ai_note}")
             else:
                 console.print(f"\n[yellow]AI is retrying with Attempt {n}...[/yellow]")
-            with console.status(f"Waiting for Attempt {n} to start", spinner="dots12"):
+            with _status(f"Waiting for Attempt {n} to start"):
                 _wait_for_attempt_running(next_attempt['public_id'])
 
         # Nothing marks the log stream done when we crash, so streaming would hang.
@@ -768,7 +800,7 @@ def run_cmd(
             time.sleep(3)
 
         if current_job_status(job_public_id) == JobStatus.RETRYING:
-            with console.status("AI is analyzing the failure, waiting for retry...", spinner="dots12"):
+            with _status("AI is analyzing the failure, waiting for retry..."):
                 while current_job_status(job_public_id) == JobStatus.RETRYING:
                     time.sleep(3)
             fresh_attempts = _get_attempts()
@@ -790,7 +822,7 @@ def run_cmd(
         raise typer.Exit(code=1)
 
     # STEP 12: Download output files to the local machine
-    with console.status(f"Job Completed! Preparing your output dataset", spinner="dots12"):
+    with _status(f"Job Completed! Preparing your output dataset"):
         while current_job_status(updated_job_response['public_id']) == JobStatus.CLEANUP:
             time.sleep(4)
             if current_job_status(updated_job_response['public_id']) == JobStatus.COMPLETED:
@@ -820,7 +852,7 @@ def run_cmd(
         console.print("[yellow]Job was cancelled. No output files will be downloaded.[/yellow]")
         raise typer.Exit(code=1)
 
-    with console.status(f"Downloading output files", spinner="dots12"):
+    with _status(f"Downloading output files"):
         if download_path:
             job_with_output = api_client.get(f"/jobs?public_id={updated_job_response['public_id']}")[0]
             output_dataset_id = job_with_output.get("output_dataset_public_id")

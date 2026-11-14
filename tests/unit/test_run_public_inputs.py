@@ -51,8 +51,9 @@ def _invoke(extra_args, *, track=None, items=None, upload=None):
     heartbeat.return_value.__enter__.side_effect = lambda *a: order.append(("heartbeat on", TRANSFER_ID))
     heartbeat.return_value.__exit__.side_effect = lambda *a: order.append(("heartbeat off", TRANSFER_ID))
 
-    def prepare(specs, cwd):
+    def prepare(specs, cwd, use_cache=True):
         order.append(("prepare", [(s.kind, s.source) for s in specs]))
+        prepare.use_cache = use_cache
         # The job must not exist yet when the manifest is built.
         assert not any(c[1] == "/jobs" for c in calls)
         return prepared
@@ -70,6 +71,7 @@ def _invoke(extra_args, *, track=None, items=None, upload=None):
          patch("thoa.cli.commands.run.time", mock_time), \
          patch("thoa.core.resolve_environment_spec", return_value=""):
         result = runner.invoke(app, ["run", "-i", "SRR390728", "--tools", "bash", "--cmd", "echo hi", *extra_args])
+    result.prepare_use_cache = getattr(prepare, "use_cache", None)
     return result, calls, order
 
 
@@ -152,3 +154,13 @@ def test_ambiguous_accession_fails_before_anything_is_created(tmp_path, monkeypa
     assert result.exit_code == 1
     assert "sra:SRR390728" in result.output
     api.post.assert_not_called()
+
+
+def test_no_cache_flag_reaches_prepare():
+    result, _, _ = _invoke(["--run-async"])
+    assert result.exit_code == 0, result.output
+    assert result.prepare_use_cache is True
+
+    result, _, _ = _invoke(["--run-async", "--no-cache"])
+    assert result.exit_code == 0, result.output
+    assert result.prepare_use_cache is False

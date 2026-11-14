@@ -200,6 +200,7 @@ def run_cmd(
     strict: bool = False,
     max_attempts: int = 3,
     disable_preflight: bool = False,
+    no_cache: bool = False,
 ):
     
     """Run the job with the given configuration using the Bioconda-based execution environment."""
@@ -426,7 +427,7 @@ def run_cmd(
     # collisions and quota problems fail without leaving a job behind.
     prepared = None
     if parsed_inputs:
-        prepared = prepare_mixed_transfer(parsed_inputs, cwd=os.getcwd())
+        prepared = prepare_mixed_transfer(parsed_inputs, cwd=os.getcwd(), use_cache=not no_cache)
 
     # STEP 2: Create the script and the job
     submit_console = get_console()

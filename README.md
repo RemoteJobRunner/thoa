@@ -47,6 +47,7 @@ thoa run -i GCF_000001405.40 ...                                        # GRCh38
 | Command | Description |
 |---------|-------------|
 | `thoa run` | Submit a remote job |
+| `thoa dataset create` | Create a dataset from `--input` sources without running a job |
 | `thoa dataset list` | List available datasets |
 | `thoa dataset download` | Download a dataset |
 | `thoa jobs list` | List recent jobs |

@@ -338,3 +338,84 @@ def test_entrypoint_does_not_hide_local_errors(monkeypatch):
 
     with pytest.raises(FileNotFoundError):
         ep.main()
+
+
+# --- thoa run with local inputs: the import is tracked after the uploads -----
+
+def _local_input_backend(manifest_failures, job_status_failures=()):
+    """`thoa run --input <file>`; the uploads are patched, the import is tracked for real."""
+    manifest_failures = list(manifest_failures)
+    job_failures = list(job_status_failures)
+    run_handler = _run_backend(job_failures)
+
+    def handler(request):
+        if request.url.path == "/api/data-transfers/transfer-1/manifest":
+            if manifest_failures:
+                failure = manifest_failures.pop(0)
+                if isinstance(failure, int):
+                    return httpx.Response(failure)
+                raise failure
+            return httpx.Response(200, json={
+                "total_items": 1, "skipped_items": 0, "status": "completed",
+                "completed_paths": ["data.txt"],
+            })
+        return run_handler(request)
+
+    return handler
+
+
+def _invoke_run_with_local_input(api, tmp_path):
+    from thoa.core.local_transfer import PreparedTransfer
+
+    input_file = tmp_path / "data.txt"
+    input_file.write_text("hello")
+    prepared = PreparedTransfer(
+        transfer_id="transfer-1",
+        manifest={"items": [{"provider": "local", "upload_required": True, "size": 5}]},
+    )
+    run_time = MagicMock()
+    run_time.time.side_effect = count(0.0, 5.0)
+    reconnect_time = MagicMock()
+    reconnect_time.monotonic.side_effect = count(0.0, 5.0)
+    api.stream_logs_blocking = MagicMock(return_value=StreamOutcome.SUCCEEDED)
+
+    with patch("thoa.cli.commands.run.api_client", api), \
+         patch("thoa.core.job_utils.api_client", api), \
+         patch("thoa.core.local_transfer.api_client", api), \
+         patch("thoa.core.remote_inputs.api_client", api), \
+         patch("thoa.cli.commands.run.prepare_mixed_transfer", return_value=prepared), \
+         patch("thoa.cli.commands.run.start_transfer"), \
+         patch("thoa.cli.commands.run.upload_local_items"), \
+         patch("thoa.cli.commands.run.ClientHeartbeat"), \
+         patch("thoa.cli.commands.run.time", run_time), \
+         patch("thoa.core.remote_inputs.time"), \
+         patch("thoa.core.reconnect.time", reconnect_time), \
+         patch("thoa.core.resolve_environment_spec", return_value=""):
+        return runner.invoke(app, [
+            "run", "--input", str(input_file), "--tools", "bash", "--cmd", "echo hi",
+        ])
+
+
+def test_run_survives_connection_loss_while_tracking_the_import(tmp_path):
+    api = _api(_local_input_backend(
+        [httpx.ReadTimeout("t"), 502, httpx.ConnectError("c")],
+        [httpx.RemoteProtocolError("dc")],
+    ))
+
+    result = _invoke_run_with_local_input(api, tmp_path)
+
+    assert result.exit_code == 0, result.output
+    assert result.exception is None, repr(result.exception)
+    assert api.reconnector is None
+
+
+def test_run_gives_up_cleanly_while_tracking_the_import(tmp_path):
+    api = _api(_local_input_backend([httpx.ConnectError("down")] * 1000))
+
+    result = _invoke_run_with_local_input(api, tmp_path)
+
+    assert result.exit_code == 1
+    assert isinstance(result.exception, SystemExit), repr(result.exception)
+    assert "thoa jobs attach job-1" in result.output
+    assert "Dataset import failed" not in result.output
+    assert api.reconnector is None

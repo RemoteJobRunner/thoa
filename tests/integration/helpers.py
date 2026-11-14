@@ -1,8 +1,13 @@
+import re
 import time
 import httpx
 import os
 
+from typer.testing import CliRunner
+from thoa.cli import app
 from thoa.core.version_check import current_version
+
+_runner = CliRunner()
 
 
 def api_url() -> str:
@@ -33,20 +38,29 @@ def api_delete(path: str, **kwargs) -> httpx.Response:
     return httpx.delete(f"{api_url()}/api{path}", headers=api_headers(), timeout=30, **kwargs)
 
 
-def create_file(filename: str = "test.txt", size: int = 100) -> str:
-    resp = api_post("/files", json={
-        "filename": filename,
-        "size": size,
-        "md5sum": "d41d8cd98f00b204e9800998ecf8427e",
-    })
-    assert resp.status_code == 200, resp.text
-    return resp.json()["public_id"]
+def extract_job_id(output: str) -> str | None:
+    m = re.search(r"jobs/([0-9a-f-]{36})", output)
+    return m.group(1) if m else None
 
 
-def create_dataset(file_ids: list[str]) -> dict:
-    resp = api_post("/datasets", json={"files": file_ids})
-    assert resp.status_code == 200, resp.text
-    return resp.json()
+def run_job(cli_args: list[str], allow_failure: bool = False) -> tuple[str, str]:
+    """Run a job via CLI, return (job_id, output).
+
+    Forces --max-attempts=1 and --disable-preflight on every integration job so
+    AI retry/preflight paths never engage — they make assertions non-deterministic
+    and previously hung nightly runs in 'retrying' indefinitely.
+
+    Asserts exit_code == 0 by default. Pass allow_failure=True for tests that
+    intentionally submit a failing job (CLI exits non-zero when the job ends
+    in a failed terminal state, which is the correct behavior).
+    """
+    cli_args = [*cli_args, "--max-attempts", "1", "--disable-preflight"]
+    result = _runner.invoke(app, cli_args)
+    if not allow_failure:
+        assert result.exit_code == 0, f"CLI failed: {result.output}"
+    job_id = extract_job_id(result.output)
+    assert job_id, f"No job ID in output: {result.output}"
+    return job_id, result.output
 
 
 def get_job_status(job_public_id: str) -> str:

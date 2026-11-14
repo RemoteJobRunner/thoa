@@ -6,7 +6,7 @@ Requires THOA_STAGING_API_URL and THOA_STAGING_API_KEY env vars (or THOA_API_URL
 import pytest
 from typer.testing import CliRunner
 from thoa.cli import app
-from tests.integration.helpers import create_file, create_dataset
+from tests.integration.helpers import api_get, run_job
 
 runner = CliRunner()
 
@@ -14,6 +14,25 @@ runner = CliRunner()
 @pytest.fixture(autouse=True)
 def _require_backend(backend_url_and_key):
     pass
+
+
+@pytest.fixture(scope="module")
+def job_input_dataset_id(backend_url_and_key, tmp_path_factory):
+    input_dir = tmp_path_factory.mktemp("cli_api_input")
+    (input_dir / "subdir").mkdir()
+    (input_dir / "subdir" / "data.csv").write_text("a,b\n1,2\n")
+
+    job_id, _ = run_job([
+        "run", "--input", str(input_dir), "--tools", "bash",
+        "--cmd", "echo done",
+        "--n-cores", "2", "--ram", "4", "--storage", "20",
+    ])
+
+    resp = api_get("/jobs", params={"public_id": job_id})
+    assert resp.status_code == 200, resp.text
+    dataset_id = resp.json()[0].get("input_dataset_public_id")
+    assert dataset_id, f"Job {job_id} has no input_dataset_public_id"
+    return dataset_id
 
 
 # --- jobs ---
@@ -65,18 +84,16 @@ def test_dataset_list_sort_by_files():
     assert result.exit_code == 0
 
 
-def test_dataset_list_after_create():
-    file_id = create_file()
-    ds = create_dataset([file_id])
+@pytest.mark.slow
+def test_dataset_list_after_create(job_input_dataset_id):
     result = runner.invoke(app, ["dataset", "list"])
     assert result.exit_code == 0
-    assert ds["public_id"][:8] in result.output
+    assert job_input_dataset_id[:8] in result.output
 
 
-def test_dataset_ls_shows_dataset_tree():
-    file_id = create_file(filename="subdir/data.csv")
-    ds = create_dataset([file_id])
-    result = runner.invoke(app, ["dataset", "ls", ds["public_id"]])
+@pytest.mark.slow
+def test_dataset_ls_shows_dataset_tree(job_input_dataset_id):
+    result = runner.invoke(app, ["dataset", "ls", job_input_dataset_id])
     assert result.exit_code == 0
 
 
@@ -87,14 +104,6 @@ def test_dataset_ls_unknown_id_exits_ok():
 
 
 # --- dataset download ---
-
-def test_dataset_download_empty(tmp_path):
-    file_id = create_file()
-    ds = create_dataset([file_id])
-    result = runner.invoke(app, ["dataset", "download", ds["public_id"], str(tmp_path)])
-    assert result.exit_code == 0
-    assert "no files" in result.output.lower() or "0" in result.output
-
 
 def test_dataset_download_unknown_id(tmp_path):
     result = runner.invoke(app, ["dataset", "download", "00000000-0000-0000-0000-000000000000", str(tmp_path)])

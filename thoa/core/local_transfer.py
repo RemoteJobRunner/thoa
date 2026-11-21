@@ -7,7 +7,7 @@ from typing import List
 from rich.progress import BarColumn, MofNCompleteColumn, Progress, TextColumn
 
 from thoa.core.api_utils import api_client
-from thoa.core.input_specs import ParsedInputSpec
+from thoa.core.input_specs import THOA_ID_KINDS, ParsedInputSpec
 from thoa.core.job_utils import (
     collect_files,
     file_sizes_in_bytes,
@@ -87,6 +87,8 @@ def prepare_mixed_transfer(specs: List[ParsedInputSpec], cwd: str) -> PreparedTr
     local_specs = [s for s in specs if s.kind == "local"]
     gdrive_specs = [s for s in specs if s.kind == "google_drive"]
     public_specs = [s for s in specs if s.kind in PUBLIC_PROVIDERS]
+    # Datasets and files already on THOA (kinds set by resolve_thoa_ids).
+    thoa_specs = [s for s in specs if s.kind in THOA_ID_KINDS]
 
     # Collect files per-spec so we can compute the correct mount_path for each file.
     # First spec to claim a file wins (handles overlapping source paths).
@@ -184,6 +186,19 @@ def prepare_mixed_transfer(specs: List[ParsedInputSpec], cwd: str) -> PreparedTr
                 item["base_dir"] = cwd
             manifest_items.append(item)
 
+        for spec in thoa_specs:
+            item = {"provider": "thoa", "source_ref": {f"{spec.kind}_id": spec.source}}
+            if spec.mount_path:
+                # Relative mount paths are relative to cwd, like local inputs. A trailing
+                # "/" on a file's mount means "into this directory", so keep it.
+                mount = os.path.normpath(os.path.join(cwd, spec.mount_path))
+                if spec.kind == "file" and spec.mount_path.endswith(("/", os.sep)):
+                    mount += "/"
+                item["mount_path"] = mount
+            else:
+                item["base_dir"] = cwd
+            manifest_items.append(item)
+
         status.update(
             "Resolving public accessions and building file manifest..."
             if public_specs else "Building file manifest..."
@@ -198,13 +213,22 @@ def prepare_mixed_transfer(specs: List[ParsedInputSpec], cwd: str) -> PreparedTr
     # Check for mount path conflicts (server returns 409 on conflict)
     items = manifest_resp.get("items", [])
     n_local_skipped = sum(1 for item in items if not item.get("upload_required") and item.get("provider") == "local")
-    n_remote_skipped = sum(1 for item in items if not item.get("upload_required") and item.get("provider") != "local")
+    n_remote_skipped = sum(
+        1 for item in items if not item.get("upload_required") and item.get("provider") not in ("local", "thoa")
+    )
+    thoa_items = [item for item in items if item.get("provider") == "thoa"]
     if public_specs:
         public_items = [item for item in items if item.get("provider") in PUBLIC_PROVIDERS]
         public_bytes = sum(item.get("size") or 0 for item in public_items)
         console.print(
             f"[green]Resolved {len(public_specs)} public accession(s):[/green] "
             f"{len(public_items)} file(s), {_format_bytes(public_bytes)}"
+        )
+    if thoa_specs:
+        console.print(
+            f"[green]Using {len(thoa_specs)} existing dataset(s)/file(s):[/green] "
+            f"{len(thoa_items)} file(s), {_format_bytes(sum(item.get('size') or 0 for item in thoa_items))}, "
+            "already in storage"
         )
     for note in manifest_resp.get("notes") or []:
         console.print(f"  [yellow]Note:[/yellow] {note}")

@@ -34,7 +34,7 @@ from thoa.core.job_utils import (
     max_threads,
     console
 )
-from thoa.core.input_specs import InputSpecError, parse_input_spec
+from thoa.core.input_specs import THOA_ID_KINDS, InputSpecError, parse_input_spec, resolve_thoa_ids
 from thoa.core.remote_inputs import (
     authorize_google_drive_transfer,
     detect_input_source_kind,
@@ -56,21 +56,30 @@ from thoa.core.job_status import JobStatus, UPLOAD_STATUSES, TERMINAL_STATUSES, 
 max_threads = min(32, os.cpu_count() * 2)
 
 
-def _print_staged_paths(rel_paths: list) -> None:
-    """Print up to five entries from a job's adjusted input context.
+def _existing_input_totals(specs) -> tuple[int, int]:
+    """(file count, bytes) of dataset and file id inputs, for the dry-run summary.
 
-    Mirrors the truncation rule used for input-dataset display so both
-    branches look the same: full list when <=5 items, else first four +
-    ellipsis + last.
+    An upper bound: a file in two inputs is counted twice here but staged once.
     """
-    if len(rel_paths) <= 5:
-        for rel_path in rel_paths:
-            console.print(f"  ./{rel_path}")
-    else:
-        for rel_path in rel_paths[:4]:
-            console.print(f"  ./{rel_path}")
-        console.print("  ...")
-        console.print(f"  ./{rel_paths[-1]}")
+    n_files, n_bytes = 0, 0
+    for spec in specs:
+        if spec.kind == "dataset":
+            rows = api_client.get("/datasets", params={
+                "public_id": spec.source,
+                "include_jobs_as_input": False,
+                "include_jobs_as_output": False,
+                "include_context": False,
+                "include_adjusted_context": False,
+            }) or []
+            row = rows[0] if rows else {}
+            n_files += row.get("number_of_files") or 0
+            n_bytes += row.get("total_size") or 0
+        else:
+            rows = api_client.get("/files", params={"public_id": spec.source}) or []
+            row = rows[0] if rows else {}
+            n_files += 1 if row else 0
+            n_bytes += row.get("size") or 0
+    return n_files, n_bytes
 
 
 def _print_env_build_failure(job_id: str) -> None:
@@ -157,6 +166,9 @@ def _print_dry_run_summary(
     elif dataset_source == "existing":
         table.add_row("[label]Input Dataset[/label]", f"[value]{n_files} file(s) ({size_str})[/value]")
         table.add_row("[label]Dataset Source[/label]", "[value]Existing dataset (no upload)[/value]")
+    elif dataset_source == "mixed":
+        table.add_row("[label]Input Files[/label]", f"[value]{n_files} file(s) ({size_str})[/value]")
+        table.add_row("[label]Dataset Source[/label]", "[value]New upload + existing data[/value]")
     else:
         table.add_row("[label]Input Files[/label]", "[value]None[/value]")
 
@@ -204,10 +216,13 @@ def run_cmd(
     
     """Run the job with the given configuration using the Bioconda-based execution environment."""
 
-    # Transitional CLI behavior:
-    # - local --input remains unchanged
-    # - Google Drive input moves from --input-source to --input <url>::<mount_path>
-    # - dataset ids intentionally stay on --input-dataset
+    # --input takes local paths, Google Drive URLs, public accessions and the ids
+    # of datasets or files already on THOA, all with optional ::<mount_path>.
+    # --input-dataset <id> is a deprecated alias for --input <id>.
+    if input_dataset:
+        console.print("[yellow]--input-dataset is deprecated: pass the dataset id to --input instead.[/yellow]")
+        inputs = [*(inputs or []), input_dataset.strip()]
+        input_dataset = None
     try:
         parsed_inputs = [parse_input_spec(raw) for raw in (inputs or [])]
     except InputSpecError as exc:
@@ -225,6 +240,14 @@ def run_cmd(
             + ", ".join(spec.raw for spec in unknown_specs)
         )
         raise typer.Exit(code=1)
+
+    # Dataset and file ids: the server says which is which before anything is created.
+    try:
+        resolve_thoa_ids(parsed_inputs)
+    except InputSpecError as exc:
+        console.print(f"[bold red]Error:[/bold red] {exc}")
+        raise typer.Exit(code=1)
+    thoa_specs = [spec for spec in parsed_inputs if spec.kind in THOA_ID_KINDS]
 
     export_remote_ref = None
     export_transfer_public_id = None
@@ -257,12 +280,6 @@ def run_cmd(
             console.print("[bold red]Error:[/bold red] Unsupported remote --input value.")
             raise typer.Exit(code=1)
 
-    if (remote_specs or public_specs) and input_dataset:
-        console.print(
-            "[bold red]Error:[/bold red] Cannot combine --input-dataset with remote --input."
-        )
-        raise typer.Exit(code=1)
-
     if export_remote_ref:
         export_payload = {
             "provider": "google_drive",
@@ -291,27 +308,8 @@ def run_cmd(
 
     inputs = [spec.source for spec in local_specs]  # kept for dry-run compat
 
-    if input_dataset and parsed_inputs:
-        console.print(
-            "[bold red]Error:[/bold red] Cannot specify both --input and --input-dataset options at the same time. Please choose one or the other."
-        )
-        exit(1)
-
-    if input_dataset:
-        all_files = []
-        input_dataset = input_dataset.strip()
-        input_dataset_response = api_client.get(f"/datasets?public_id={input_dataset}&include_adjusted_context=True&include_jobs_as_input=False&include_jobs_as_output=False")[0]
-        dataset_status = input_dataset_response.get("status")
-        if dataset_status in ("deleting", "deleted"):
-            console.print("[bold red]Error:[/bold red] Dataset is being deleted or has been deleted and cannot be used as input.")
-            raise typer.Exit(code=1)
-        if dataset_status == "creating":
-            console.print("[bold red]Error:[/bold red] Dataset upload is still in progress and cannot be used as input yet.")
-            raise typer.Exit(code=1)
-
-        check_dataset_fits_disk(input_dataset_response.get("total_size") or 0, storage)
-
-    elif inputs:
+    all_files = []
+    if inputs:
         all_files = collect_files(inputs)
         if len(all_files) > 1000:
             console.print(
@@ -325,12 +323,9 @@ def run_cmd(
         # POST /jobs checks the full total there.
         check_dataset_fits_disk(sum(file_sizes_in_bytes(all_files).values()), storage)
 
-    else:
-        pass
-
     print_config(
-        inputs=inputs + [f"{spec.source} ({spec.kind})" for spec in public_specs],
-        input_dataset=input_dataset,
+        inputs=inputs + [f"{spec.source} ({spec.kind})" for spec in public_specs + thoa_specs],
+        input_dataset=None,
         output=output,
         n_cores=n_cores,
         ram=ram,
@@ -361,18 +356,18 @@ def run_cmd(
         return
 
     if dry_run:
-        if input_dataset:
-            total_size_bytes = input_dataset_response.get("total_size") or 0
-            n_files = len(input_dataset_response.get("adjusted_context") or {})
-            dataset_source = "existing"
-        elif inputs:
-            file_sizes = file_sizes_in_bytes(all_files)
-            total_size_bytes = sum(file_sizes.values())
-            n_files = len(all_files)
+        total_size_bytes = sum(file_sizes_in_bytes(all_files).values()) if all_files else 0
+        n_files = len(all_files)
+        existing_files, existing_bytes = _existing_input_totals(thoa_specs)
+        n_files += existing_files
+        total_size_bytes += existing_bytes
+        if all_files and thoa_specs:
+            dataset_source = "mixed"
+        elif all_files:
             dataset_source = "upload"
+        elif thoa_specs:
+            dataset_source = "existing"
         else:
-            total_size_bytes = 0
-            n_files = 0
             dataset_source = "none"
 
         estimate = api_client.get(
@@ -472,10 +467,6 @@ def run_cmd(
             "output_directory": str(output),
         }
 
-        if input_dataset:
-            job_update_payload["input_dataset_public_id"] = input_dataset
-            job_update_payload["input_context"] = input_dataset_response.get("adjusted_context", {})
-
         updated_job_response = api_client.put(
             f"/jobs/{job_response['public_id']}",
             json=job_update_payload,
@@ -520,14 +511,8 @@ def run_cmd(
 
     # STEP 4: Bring the inputs in. The job already holds the import's dataset and its
     # flow stages each file as soon as it lands, so nothing here waits for the import.
-    if not input_dataset and not parsed_inputs:
+    if not parsed_inputs:
         console.print("[yellow]No input files specified. Skipping input upload.[/yellow]")
-
-    elif input_dataset:
-        console.print(f"[green]Using dataset {input_dataset} as job input.[/green]")
-        console.print("[yellow]Using existing input dataset. Files will be staged under:[/yellow]")
-        rel_paths = list(input_dataset_response.get("adjusted_context", {}).keys())
-        _print_staged_paths(rel_paths)
 
     else:
         job_public_id = job_response['public_id']
@@ -600,24 +585,7 @@ def run_cmd(
             while current_job_status(updated_job_response['public_id']) == JobStatus.STAGING:
                 time.sleep(4)
 
-    if input_dataset:
-        with console.status(f"Queuing your job", spinner="dots12"):
-            while current_job_status(updated_job_response['public_id']) in {JobStatus.CREATED, JobStatus.QUEUED}:
-                time.sleep(4)
-
-        with console.status(f"Validating your environment", spinner="dots12"):
-            while current_job_status(updated_job_response['public_id']) == JobStatus.VALIDATING:
-                time.sleep(4)
-
-        if current_job_status(updated_job_response['public_id']) == JobStatus.FAILED_VALIDATION:
-            if not _handle_validation_failure(updated_job_response['public_id']):
-                raise typer.Exit(code=1)
-
-        with console.status(f"Staging your data", spinner="dots12"):
-            while current_job_status(updated_job_response['public_id']) == JobStatus.STAGING:
-                time.sleep(4)
-
-    if prepared is None and not input_dataset:
+    if prepared is None:
         with console.status(f"Queuing your job", spinner="dots12"):
             while current_job_status(updated_job_response['public_id']) in {JobStatus.CREATED, JobStatus.QUEUED}:
                 time.sleep(4)

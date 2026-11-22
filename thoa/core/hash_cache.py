@@ -145,6 +145,7 @@ def hash_files_cached(
     results: dict = {}
     stats: dict = {}
     misses = []
+    started = time.time()
 
     for f in files:
         try:
@@ -175,7 +176,7 @@ def hash_files_cached(
         # Skip files that changed while being hashed.
         if _fingerprint(after) != _fingerprint(before):
             continue
-        cache.put(f, before, digest)
+        cache.put(f, before, digest, now=started)
 
     cache.save()
     return results

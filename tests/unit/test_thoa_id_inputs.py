@@ -126,7 +126,7 @@ def _run(args):
     api = MagicMock()
     api.post.side_effect, api.put.side_effect, api.get.side_effect = post, put, get
 
-    def prepare(specs, cwd):
+    def prepare(specs, cwd, use_cache=True):
         prepared_specs.extend((s.kind, s.source, s.mount_path) for s in specs)
         return PreparedTransfer(transfer_id="t-1", manifest={"items": [{"provider": "thoa", "size": 1}]})
 

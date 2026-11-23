@@ -542,3 +542,21 @@ def test_check_dataset_fits_disk_no_warning_when_small():
     with patch.object(lt, "console", console_mock):
         lt.check_dataset_fits_disk(1 * _GB, 10)
     assert not console_mock.print.called
+
+
+@pytest.mark.parametrize("use_cache", [True, False])
+def test_local_hashing_goes_through_hash_cache(use_cache):
+    specs = [_local_spec()]
+    patches, _ = _patch_all(specs=specs, manifest_items=[_local_manifest_item()])
+    cached = MagicMock(return_value={_FILE_A: "md5-a"})
+    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7], patches[8], \
+         patch.object(lt, "hash_files_cached", cached):
+        patched_hash_all = lt.hash_all
+        prepared = lt.prepare_mixed_transfer(specs, cwd="/home/user", use_cache=use_cache)
+
+    cached.assert_called_once()
+    args, kwargs = cached.call_args
+    assert args[0] == [_FILE_A]
+    assert kwargs["use_cache"] is use_cache
+    assert kwargs["hash_fn"] is patched_hash_all
+    assert prepared.hashes == {_FILE_A: "md5-a"}

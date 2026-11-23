@@ -73,6 +73,13 @@ def _format_bytes(n: int) -> str:
     return f"{n} B"
 
 
+def _names_directory(mount_path: str) -> bool:
+    """True if a raw ::mount value can only mean a directory: it ends with a
+    separator or its last component is "." or ".." (e.g. "refs/", ".", "../")."""
+    last = mount_path.strip().replace(os.sep, "/").rsplit("/", 1)[-1]
+    return last in ("", ".", "..")
+
+
 def prepare_mixed_transfer(
     specs: List[ParsedInputSpec], cwd: str, use_cache: bool = True
 ) -> PreparedTransfer:
@@ -199,11 +206,12 @@ def prepare_mixed_transfer(
         for spec in thoa_specs:
             item = {"provider": "thoa", "source_ref": {f"{spec.kind}_id": spec.source}}
             if spec.mount_path:
-                # Relative mount paths are relative to cwd, like local inputs. A trailing
-                # "/" on a file's mount means "into this directory", so keep it.
+                # Relative mount paths are relative to cwd, like local inputs. A file
+                # mount that names a directory ("dir/", ".", "..") means "into this
+                # directory"; normpath drops that, so mark it with a trailing "/".
                 mount = os.path.normpath(os.path.join(cwd, spec.mount_path))
-                if spec.kind == "file" and spec.mount_path.endswith(("/", os.sep)):
-                    mount += "/"
+                if spec.kind == "file" and _names_directory(spec.mount_path):
+                    mount = mount.rstrip("/") + "/"
                 item["mount_path"] = mount
             else:
                 item["base_dir"] = cwd

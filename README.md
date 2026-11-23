@@ -54,7 +54,7 @@ thoa run -i <dataset-a> -i <dataset-b> ...      # both datasets combined into on
 ```
 
 - A dataset without `::path` keeps the layout shown by `thoa dataset ls` (for example `data/a.fq` lands at `./data/a.fq`). With `::path`, the files go under `path`, without the dataset's top folder, the same way a local directory is placed.
-- A file without `::path` lands in the current directory under its name. `::dir/` puts it inside `dir`, and `::name` puts it at exactly `name`.
+- A file without `::path` lands in the current directory under its name. `::dir/` (or `::.`, `::..`) puts it inside that directory, and `::name` puts it at exactly `name`.
 - If two inputs put different files at the same path, the run stops and lists the paths. The same file at the same path is staged once.
 - `--input-dataset <id>` still works but is deprecated: use `--input <id>`.
 

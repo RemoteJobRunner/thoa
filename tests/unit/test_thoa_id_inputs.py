@@ -101,6 +101,20 @@ def test_thoa_items_sent_with_mounts():
     ]
 
 
+@pytest.mark.parametrize("mount,expected", [
+    (".", "/home/me/proj/"),
+    ("./", "/home/me/proj/"),
+    ("..", "/home/me/"),
+    ("../", "/home/me/"),
+    ("refs/.", "/home/me/proj/refs/"),
+    ("/", "/"),
+])
+def test_file_mount_naming_a_directory_stages_inside_it(mount, expected):
+    """Like local files: -i <file-id>::. lands in the cwd under its own name, not at the cwd path."""
+    items = _manifest_items([SimpleNamespace(source=FILE_ID, kind="file", mount_path=mount)])
+    assert items[0]["mount_path"] == expected
+
+
 # ---------------------------------------------------------------------------
 # thoa run
 # ---------------------------------------------------------------------------

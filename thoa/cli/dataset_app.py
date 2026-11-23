@@ -3,6 +3,8 @@ import typer
 from thoa.core.api_utils import api_client
 from thoa.core.dataset_utils import list_datasets, download_dataset, list_files_in_dataset
 from thoa.core.input_specs import InputSpecError, parse_input_spec
+from thoa.core.job_utils import collect_files
+from thoa.core.reconnect import TRANSIENT_ERRORS, describe_error
 from thoa.core.local_transfer import (
     ClientHeartbeat,
     prepare_mixed_transfer,
@@ -61,27 +63,59 @@ def create(
         console.print("[bold red]Error:[/bold red] Unsupported --input value(s): " + ", ".join(unknown))
         raise typer.Exit(code=1)
 
+    # Catch empty local inputs before anything is sent to the server.
+    empty = [spec.raw for spec in specs if spec.kind == "local" and not collect_files([spec.source])]
+    if empty:
+        console.print("[bold red]Error:[/bold red] No files found in: " + ", ".join(empty))
+        raise typer.Exit(code=1)
+
     # Same steps 'thoa run' takes for its inputs, minus the job.
     prepared = prepare_mixed_transfer(specs, cwd=os.getcwd())
-    if prepared.has_local_uploads:
-        # Only this CLI can upload them; the heartbeat lets the server tell if it goes away.
-        with ClientHeartbeat(prepared.transfer_id):
+    if not prepared.items:
+        console.print("[bold red]Error:[/bold red] The inputs contain no files.")
+        raise typer.Exit(code=1)
+
+    # The manifest has created the dataset: show its ID now, so an interrupted
+    # import doesn't leave the user without it.
+    transfer = api_client.get(f"/data-transfers/{prepared.transfer_id}") or {}
+    dataset_id = transfer.get("dataset_public_id")
+    if not dataset_id:
+        console.print("[bold red]Error:[/bold red] The server did not return the dataset for this import.")
+        raise typer.Exit(code=1)
+    console.print(f"Dataset [cyan]{dataset_id}[/cyan] created, importing its files.")
+
+    try:
+        if prepared.has_local_uploads:
+            # Only this CLI can upload them; the heartbeat lets the server tell if it goes away.
+            with ClientHeartbeat(prepared.transfer_id):
+                start_transfer(prepared)
+                upload_local_items(prepared)
+        else:
             start_transfer(prepared)
-            upload_local_items(prepared)
-    else:
-        start_transfer(prepared)
+    except (KeyboardInterrupt, *TRANSIENT_ERRORS) as exc:
+        reason = "Interrupted" if isinstance(exc, KeyboardInterrupt) else f"Lost connection ({describe_error(exc)})"
+        console.print(
+            f"\n[bold red]{reason} before all local files were uploaded.[/bold red] "
+            f"Dataset {dataset_id} can't finish without them. Run the same command again: "
+            "files already uploaded are skipped."
+        )
+        raise typer.Exit(code=130 if isinstance(exc, KeyboardInterrupt) else 1)
 
     try:
         track_transfer(prepared)
     except RuntimeError as exc:
         console.print(f"[bold red]{exc}[/bold red]")
         raise typer.Exit(code=1)
-
-    transfer = api_client.get(f"/data-transfers/{prepared.transfer_id}") or {}
-    dataset_id = transfer.get("dataset_public_id")
-    if not dataset_id:
-        console.print("[bold red]Error:[/bold red] The import finished but the server did not return its dataset.")
-        raise typer.Exit(code=1)
+    except (KeyboardInterrupt, *TRANSIENT_ERRORS) as exc:
+        # Every local file is uploaded, so the server finishes the import without us.
+        reason = "Detached." if isinstance(exc, KeyboardInterrupt) else f"Lost connection ({describe_error(exc)})."
+        console.print(
+            f"\n[yellow]{reason} The import keeps running server-side.[/yellow]\n"
+            f"  Dataset: [cyan]{dataset_id}[/cyan]\n"
+            f"  Use it once the import finishes: [bold]thoa run --input-dataset {dataset_id} ...[/bold] "
+            "(it tells you if the import is still running)"
+        )
+        raise typer.Exit(code=0 if isinstance(exc, KeyboardInterrupt) else 1)
 
     console.print(f"[bold green]Dataset created:[/bold green] [cyan]{dataset_id}[/cyan]")
     console.print(f"Use it with: [bold]thoa run --input-dataset {dataset_id} ...[/bold]")

@@ -45,11 +45,17 @@ def parse_input_spec(raw: str) -> ParsedInputSpec:
             )
         return ParsedInputSpec(raw=raw, source=accession, mount_path=mount_path, kind=provider)
 
+    kind = detect_input_spec_kind(source)
+    if kind == "local":
+        # detect_input_spec_kind expands "~" to find the path; do the same for
+        # everything that reads it later (the shell doesn't for --input=~/x).
+        source = str(Path(source).expanduser())
+
     return ParsedInputSpec(
         raw=raw,
         source=source,
         mount_path=mount_path,
-        kind=detect_input_spec_kind(source),
+        kind=kind,
     )
 
 

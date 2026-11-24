@@ -38,3 +38,16 @@ def test_parse_input_spec_splits_file_link_and_mount_path():
     assert spec.kind == "google_drive"
     assert spec.source == FILE_URL
     assert spec.mount_path == "/data/inputs"
+
+
+def test_parse_input_spec_expands_tilde_for_local_paths(tmp_path, monkeypatch):
+    # The shell leaves "~" alone in --input=~/data; collect_files must still find it.
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / "data").mkdir()
+
+    spec = parse_input_spec("~/data::inputs")
+
+    assert spec.kind == "local"
+    assert spec.source == str(tmp_path / "data")
+    assert spec.mount_path == "inputs"
+    assert spec.raw == "~/data::inputs"

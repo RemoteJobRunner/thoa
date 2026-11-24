@@ -37,7 +37,8 @@ def test_run_requires_tools_or_env_source():
     assert "tools" in result.output.lower() or "env-source" in result.output.lower()
 
 
-def test_run_input_dataset_not_implemented():
+def test_run_input_dataset_rejects_a_non_id():
+    # --input-dataset is an alias for --input, so a value that isn't an id is rejected.
     result = runner.invoke(app, [
         "run",
         "--input-dataset", "abc123",
@@ -46,6 +47,7 @@ def test_run_input_dataset_not_implemented():
     ])
 
     assert result.exit_code != 0
+    assert "abc123" in result.output
 
 
 def test_run_async_exits_after_upload(tmp_path):

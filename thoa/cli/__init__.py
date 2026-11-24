@@ -27,14 +27,17 @@ def run_cmd(
         "Public accessions are fetched server-side: SRA/ENA/DDBJ reads (SRR…, SRX…, SRS…, SAMN…, SRP…, PRJNA…/PRJEB…) "
         "NCBI assemblies (GCF_…/GCA_…) and GEO series (GSE…: processed files plus raw reads), "
         "e.g. -i SRR390728 or -i GSE52778::geo/. "
-        "Prefix with sra:, assembly: or geo: if a local path has the same name.",
+        "Prefix with sra:, assembly: or geo: if a local path has the same name. "
+        "The id of one of your datasets or files uses it without re-uploading, e.g. -i <dataset-id>::inputs/; "
+        "several dataset ids are combined into one input dataset.",
     ),
     export_to: Optional[str] = typer.Option(
         None, "--export-to", help="Remote export destination such as a Google Drive folder URL. "
         "The finished output dataset will be exported there after the run completes.",
     ),
     input_dataset: Optional[str] = typer.Option(
-        None, "--input-dataset", help="Minihash identifying an existing input dataset (bypasses file upload)."
+        None, "--input-dataset", hidden=True,
+        help="Deprecated: pass the dataset id to --input instead.",
     ),
     output: Path = typer.Option(
         "./", "--output", "-o", help="Output files or directories to download after job completion. "
@@ -141,7 +144,6 @@ def run_cmd(
         dry_run=dry_run,
         verbose=verbose,
         has_input_data=has_input_data,
-        use_existing_input_dataset=bool(input_dataset),
         strict=strict,
         max_attempts=max_attempts,
         disable_preflight=disable_preflight,

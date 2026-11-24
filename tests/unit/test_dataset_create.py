@@ -78,7 +78,7 @@ def test_local_input_uploads_and_prints_dataset_id(tmp_path):
     assert calls[1:] == ["heartbeat", "start", "upload", "track"]
     mock_api.get.assert_called_once_with(f"/data-transfers/{_TRANSFER_ID}")
     assert "Dataset created" in _out(result)
-    assert f"--input-dataset {_DATASET_ID}" in _out(result)
+    assert f"--input {_DATASET_ID}" in _out(result)
 
 
 def test_dataset_id_is_printed_before_the_upload_starts(tmp_path):
@@ -102,6 +102,32 @@ def test_server_side_only_inputs_skip_upload_and_heartbeat():
     assert result.exit_code == 0, result.output
     assert [s.kind for s in calls[0][1]] == ["google_drive"]
     assert calls[1:] == ["start", "track"]
+
+
+_EXISTING_DATASET = "33333333-3333-3333-3333-333333333333"
+_EXISTING_FILE = "44444444-4444-4444-4444-444444444444"
+
+
+def test_dataset_and_file_ids_are_resolved_before_the_import(tmp_path):
+    # prepare_mixed_transfer only sends ids resolved to "dataset"/"file"; an unresolved one would be dropped.
+    resolver = MagicMock()
+    resolver.get.side_effect = lambda path: {"type": "dataset" if _EXISTING_DATASET in path else "file"}
+    with patch("thoa.core.api_utils.api_client", resolver):
+        result, calls, _ = _invoke(["-i", _EXISTING_DATASET, "-i", f"{_EXISTING_FILE}::refs/", "-i", _file(tmp_path)])
+
+    assert result.exit_code == 0, result.output
+    assert [s.kind for s in calls[0][1]] == ["dataset", "file", "local"]
+
+
+def test_unknown_id_is_rejected_before_the_import():
+    resolver = MagicMock()
+    resolver.get.return_value = {"type": None}
+    with patch("thoa.core.api_utils.api_client", resolver):
+        result, calls, _ = _invoke(["-i", _EXISTING_DATASET])
+
+    assert result.exit_code == 1
+    assert calls == []
+    assert "No dataset or file" in _out(result)
 
 
 def test_tilde_in_local_input_is_expanded(tmp_path, monkeypatch):
@@ -173,7 +199,7 @@ def test_ctrl_c_while_importing_detaches_and_keeps_the_id(tmp_path):
 
     assert result.exit_code == 0
     assert "Detached" in _out(result)
-    assert f"--input-dataset {_DATASET_ID}" in _out(result)
+    assert f"--input {_DATASET_ID}" in _out(result)
 
 
 def test_network_error_while_importing_keeps_the_id(tmp_path):
@@ -181,7 +207,7 @@ def test_network_error_while_importing_keeps_the_id(tmp_path):
 
     assert result.exit_code == 1
     assert "Lost connection (ReadTimeout: timed out)" in _out(result)
-    assert f"--input-dataset {_DATASET_ID}" in _out(result)
+    assert f"--input {_DATASET_ID}" in _out(result)
     assert "Traceback" not in _out(result)
 
 

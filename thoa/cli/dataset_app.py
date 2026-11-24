@@ -2,7 +2,7 @@ import os
 import typer
 from thoa.core.api_utils import api_client
 from thoa.core.dataset_utils import list_datasets, download_dataset, list_files_in_dataset
-from thoa.core.input_specs import InputSpecError, parse_input_spec
+from thoa.core.input_specs import InputSpecError, parse_input_spec, resolve_thoa_ids
 from thoa.core.job_utils import collect_files
 from thoa.core.reconnect import TRANSIENT_ERRORS, describe_error
 from thoa.core.local_transfer import (
@@ -47,11 +47,11 @@ def list_(
 def create(
     inputs: List[str] = typer.Option(
         ..., "--input", "-i", help="Input to add to the dataset. Accepts everything 'thoa run --input' does: "
-        "local paths, Google Drive URLs and public accessions, each optionally as <source>::<mount_path>. "
-        "Repeat for several inputs.",
+        "local paths, Google Drive URLs, public accessions and the ids of your datasets or files, "
+        "each optionally as <source>::<mount_path>. Repeat for several inputs.",
     ),
 ):
-    """Create a dataset from inputs without running a job, to reuse with 'thoa run --input-dataset'."""
+    """Create a dataset from inputs without running a job, to reuse with 'thoa run --input <id>'."""
     try:
         specs = [parse_input_spec(raw) for raw in inputs]
     except InputSpecError as exc:
@@ -61,6 +61,13 @@ def create(
     unknown = [spec.raw for spec in specs if spec.kind == "unknown"]
     if unknown:
         console.print("[bold red]Error:[/bold red] Unsupported --input value(s): " + ", ".join(unknown))
+        raise typer.Exit(code=1)
+
+    # Dataset and file ids: the server says which is which before anything is created.
+    try:
+        resolve_thoa_ids(specs)
+    except InputSpecError as exc:
+        console.print(f"[bold red]Error:[/bold red] {exc}")
         raise typer.Exit(code=1)
 
     # Catch empty local inputs before anything is sent to the server.
@@ -112,13 +119,13 @@ def create(
         console.print(
             f"\n[yellow]{reason} The import keeps running server-side.[/yellow]\n"
             f"  Dataset: [cyan]{dataset_id}[/cyan]\n"
-            f"  Use it once the import finishes: [bold]thoa run --input-dataset {dataset_id} ...[/bold] "
+            f"  Use it once the import finishes: [bold]thoa run --input {dataset_id} ...[/bold] "
             "(it tells you if the import is still running)"
         )
         raise typer.Exit(code=0 if isinstance(exc, KeyboardInterrupt) else 1)
 
     console.print(f"[bold green]Dataset created:[/bold green] [cyan]{dataset_id}[/cyan]")
-    console.print(f"Use it with: [bold]thoa run --input-dataset {dataset_id} ...[/bold]")
+    console.print(f"Use it with: [bold]thoa run --input {dataset_id} ...[/bold]")
 
 
 @app.command("download")

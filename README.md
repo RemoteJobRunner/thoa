@@ -42,6 +42,22 @@ thoa run -i GCF_000001405.40 ...                                        # GRCh38
 - `::path` puts the files somewhere else. If a local file or directory has the same name as an accession, use `./NAME` for the local path or `sra:NAME` / `assembly:NAME` / `geo:NAME` for the accession.
 - Your job starts staging each file as soon as it arrives, so it doesn't wait for the whole import. Large imports keep running if you close the terminal once your local files are uploaded: press Ctrl-C to detach, `thoa jobs attach <id>` to follow, `thoa jobs cancel <id>` to stop. Files already in your storage are not fetched again.
 
+### Your datasets and files
+
+Pass the id of a dataset or file you already have on THOA to `--input`. Nothing is uploaded again, and you can mix ids with local paths, Drive links and accessions:
+
+```bash
+thoa run -i <dataset-id> ...                    # the dataset's files, laid out under the current directory
+thoa run -i <dataset-id>::inputs/ ...           # the same files directly under ./inputs/
+thoa run -i <file-id>::refs/ -i ./reads ...     # one stored file into ./refs/, plus a local directory
+thoa run -i <dataset-a> -i <dataset-b> ...      # both datasets combined into one input dataset
+```
+
+- A dataset without `::path` keeps the layout shown by `thoa dataset ls` (for example `data/a.fq` lands at `./data/a.fq`). With `::path`, the files go under `path`, without the dataset's top folder, the same way a local directory is placed.
+- A file without `::path` lands in the current directory under its name. `::dir/` (or `::.`, `::..`) puts it inside that directory, and `::name` puts it at exactly `name`.
+- If two inputs put different files at the same path, the run stops and lists the paths. The same file at the same path is staged once.
+- `--input-dataset <id>` still works but is deprecated: use `--input <id>`.
+
 ## Commands
 
 | Command | Description |

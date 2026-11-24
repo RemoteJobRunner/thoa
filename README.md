@@ -63,6 +63,7 @@ thoa run -i <dataset-a> -i <dataset-b> ...      # both datasets combined into on
 | Command | Description |
 |---------|-------------|
 | `thoa run` | Submit a remote job |
+| `thoa dataset create` | Create a dataset from `--input` sources without running a job |
 | `thoa dataset list` | List available datasets |
 | `thoa dataset download` | Download a dataset |
 | `thoa jobs list` | List recent jobs |

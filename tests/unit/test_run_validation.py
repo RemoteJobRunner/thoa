@@ -242,6 +242,22 @@ def test_attach_exits_nonzero_when_stream_unavailable():
         f"Expected exit_code 1, got {result.exit_code}. Output: {result.output}"
 
 
+def test_attach_unknown_job_exits_nonzero_without_waiting():
+    # An id this account doesn't have used to poll "current: unknown" forever.
+    mock_api = MagicMock()
+    mock_api.get.return_value = []
+    mock_time = MagicMock()
+
+    with patch("thoa.core.job_utils.api_client", mock_api),          patch("thoa.core.api_utils.api_client", mock_api),          patch("thoa.cli.commands.jobs.api_client", mock_api),          patch("thoa.cli.commands.jobs.time", mock_time):
+
+        result = runner.invoke(app, ["jobs", "attach", "00000000-0000-0000-0000-000000000000"])
+
+    assert result.exit_code == 1, result.output
+    assert "No job found" in result.output
+    mock_time.sleep.assert_not_called()
+    mock_api.stream_logs_blocking.assert_not_called()
+
+
 def test_cancel_job_success():
     mock_api = MagicMock()
     mock_api.post.return_value = {"status": "cancelled", "job_id": "abc-123-def"}

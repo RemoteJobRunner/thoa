@@ -174,6 +174,12 @@ def file_sizes_in_bytes(paths, follow_symlinks=True):
     return size_map
 
 
+def find_job(job_id: str):
+    """The job with this public ID, or None if this account has no such job."""
+    results = api_client.get(f"/jobs?public_id={job_id}")
+    return results[0] if results else None
+
+
 def current_job_status(job_id: str):
     """Fetch the current status of a job by its public ID."""
     

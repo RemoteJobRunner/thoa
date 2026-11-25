@@ -336,3 +336,32 @@ def test_no_cache_flag_is_forwarded_to_run_cmd():
             ])
         assert result.exit_code == 0, result.output
         assert mock_run.call_args.kwargs["no_cache"] is expected
+
+
+def _rejecting_api():
+    # /users/validate_job_request answers 400 (the client prints it and returns None).
+    mock_api = MagicMock()
+    mock_api.get.return_value = None
+    return mock_api
+
+
+def test_run_rejected_by_resource_validation_exits_nonzero():
+    mock_api = _rejecting_api()
+    with patch("thoa.cli.commands.run.api_client", mock_api), \
+         patch("thoa.core.job_utils.api_client", mock_api):
+        result = runner.invoke(app, ["run", "--tools", "bash", "--cmd", "echo hello"])
+
+    assert result.exit_code == 1, result.output
+    mock_api.post.assert_not_called()  # no environment, script or job is created
+
+
+def test_dry_run_rejected_by_resource_validation_exits_nonzero():
+    mock_api = _rejecting_api()
+    with patch("thoa.cli.commands.run.api_client", mock_api), \
+         patch("thoa.core.job_utils.api_client", mock_api):
+        result = runner.invoke(app, ["run", "--tools", "bash", "--cmd", "echo hello", "--dry-run"])
+
+    assert result.exit_code == 1, result.output
+    assert "Failed" in result.output
+    # The estimate wasn't fetched, so don't blame it on missing VM sizes.
+    assert "no matching VMs" not in result.output

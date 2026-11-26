@@ -177,7 +177,7 @@ def _print_dry_run_summary(
         table.add_row("", "")
         table.add_row("[label]Estimated cost[/label]", f"[value]{estimate['min_credits_per_hour']:.1f} credits/hr[/value]")
         table.add_row("[label]Price range[/label]",    f"[value]{estimate['min_credits_per_hour']:.1f} – {estimate['max_credits_per_hour']:.1f} credits/hr[/value]")
-    else:
+    elif validation_passed:
         table.add_row("[label]Cost Estimate[/label]", "[warning]Unavailable — no matching VMs found for requested specs[/warning]")
 
     table.add_row("", "")
@@ -388,7 +388,8 @@ def _run_job(
                 estimate=None,
                 validation_passed=False,
             )
-        return
+        # The server's reason was printed above; exit non-zero so scripts notice.
+        raise typer.Exit(code=1)
 
     if dry_run:
         total_size_bytes = sum(file_sizes_in_bytes(all_files).values()) if all_files else 0

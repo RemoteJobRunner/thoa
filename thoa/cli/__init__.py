@@ -58,13 +58,15 @@ def run_cmd(
         200, "--storage", help="Total disk space (in GB) for the job's inputs and outputs. Defaults to 200 GB."
     ),
     tools: Optional[str] = typer.Option(
-        None, "--tools", help="List of tools (e.g., bwa, samtools=1.9). Use multiple flags or comma-separated values."
+        None, "--tools", help="Comma-separated list of conda packages (e.g., bwa,samtools=1.9). "
+        "Without --tools, --env-source or --env-id, the job runs in a base environment "
+        "(conda-forge and bioconda channels, no packages) and preflight adds the packages your command needs."
     ),
     env_source: Optional[Path] = typer.Option(
         None, "--env-source", help="Path to an environment file (.yml or .txt), or 'use-current' to capture the active conda/venv/Python environment."
     ),
     env_id: Optional[str] = typer.Option(
-        None, "--env-id", help="UUID of an existing environment to reuse (mutually exclusive with --tools and --env-source)."
+        None, "--env-id", help="UUID of an existing environment to reuse. --tools, --env-source and --env-id are mutually exclusive."
     ),
     cmd: str = typer.Option(
         ..., "--cmd", help="The command to run inside the job environment."
@@ -111,17 +113,12 @@ def run_cmd(
     has_input_data = bool(inputs) or bool(input_dataset)
 
     """Run the job with the given configuration using the Bioconda-based execution environment."""
-    # Mutual exclusion: exactly one of --tools, --env-source, --env-id must be provided
+    # Mutual exclusion: at most one of --tools, --env-source, --env-id. With none, the job uses the base environment.
     env_options = [("--tools", bool(tools)), ("--env-source", bool(env_source)), ("--env-id", bool(env_id))]
     provided = [name for name, given in env_options if given]
     if len(provided) > 1:
         console.print(
             f"[bold red]Error:[/bold red] {' and '.join(provided)} are mutually exclusive. Please specify only one of --tools, --env-source, or --env-id."
-        )
-        raise typer.Exit(code=1)
-    if len(provided) == 0:
-        console.print(
-            "[bold red]Error:[/bold red] You must specify exactly one of --tools, --env-source, or --env-id."
         )
         raise typer.Exit(code=1)
 

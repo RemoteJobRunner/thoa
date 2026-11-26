@@ -363,6 +363,19 @@ def _run_job(
         verbose=verbose,
     )
 
+    if not (tools or env_source or env_id):
+        console.print(
+            "[yellow]No --tools, --env-source or --env-id given: using the base environment "
+            "(conda-forge and bioconda channels, no packages).[/yellow]"
+        )
+        if disable_preflight:
+            console.print(
+                "[yellow]Preflight is disabled, so no packages will be added: "
+                "the command runs in the bare environment.[/yellow]"
+            )
+        else:
+            console.print("[yellow]Preflight will add the packages your command needs.[/yellow]")
+
     # STEP 0: Validate that the user has sufficient resources to run the job
     valid = validate_user_command(n_cores=n_cores, ram=ram, storage=storage)
 

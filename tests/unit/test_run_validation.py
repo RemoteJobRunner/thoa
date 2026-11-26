@@ -3,6 +3,7 @@ Client-side validation tests for `thoa run`.
 These do NOT require a live backend - they test CLI argument validation.
 """
 
+import pytest
 from unittest.mock import patch, MagicMock
 from typer.testing import CliRunner
 from thoa.cli import app
@@ -27,14 +28,78 @@ def test_run_rejects_more_than_1000_files(tmp_path):
     assert "1000" in result.output
 
 
-def test_run_requires_tools_or_env_source():
-    result = runner.invoke(app, [
-        "run",
-        "--cmd", "echo hello",
-    ])
+@pytest.mark.parametrize("env_args", [
+    ["--tools", "bwa", "--env-id", "11111111-1111-1111-1111-111111111111"],
+    ["--tools", "bwa", "--env-source", "environment.yml"],
+    ["--env-source", "environment.yml", "--env-id", "11111111-1111-1111-1111-111111111111"],
+])
+def test_run_rejects_more_than_one_env_option(env_args):
+    mock_api = MagicMock()
+    with patch("thoa.cli.commands.run.api_client", mock_api), \
+         patch("thoa.core.job_utils.api_client", mock_api):
+        result = runner.invoke(app, ["run", *env_args, "--cmd", "echo hello"])
 
     assert result.exit_code == 1
-    assert "tools" in result.output.lower() or "env-source" in result.output.lower()
+    assert "mutually exclusive" in result.output
+    mock_api.post.assert_not_called()
+
+
+def _run_without_env_options(extra_args):
+    def api_post_side_effect(path, **kwargs):
+        if path == "/scripts":
+            return {"public_id": "script-base"}
+        if path == "/jobs":
+            return {"public_id": "job-base"}
+        if path == "/environments":
+            return {"public_id": "env-base"}
+        return {}
+
+    def api_get_side_effect(path, **kwargs):
+        if path == "/users/validate_job_request":
+            return {"valid": True}
+        return {}
+
+    mock_api = MagicMock()
+    mock_api.post.side_effect = api_post_side_effect
+    mock_api.put.return_value = {"public_id": "job-base"}
+    mock_api.get.side_effect = api_get_side_effect
+
+    mock_time = MagicMock()
+    mock_time.time.return_value = 0.0
+
+    with patch("thoa.cli.commands.run.api_client", mock_api), \
+         patch("thoa.core.job_utils.api_client", mock_api), \
+         patch("thoa.cli.commands.run.time", mock_time):
+        result = runner.invoke(app, ["run", "--cmd", "echo hi", "--run-async", *extra_args])
+
+    return result, mock_api
+
+
+def test_run_without_env_options_uses_base_environment():
+    result, mock_api = _run_without_env_options([])
+
+    assert result.exit_code == 0, result.output
+    assert "base environment" in result.output
+    assert "Preflight will add" in result.output
+    env_calls = [c for c in mock_api.post.call_args_list if c.args[0] == "/environments"]
+    assert len(env_calls) == 1
+    assert env_calls[0].kwargs["json"] == {"tools": [], "env_string": ""}
+
+
+def test_run_without_env_options_and_disabled_preflight_says_env_is_bare():
+    result, mock_api = _run_without_env_options(["--disable-preflight"])
+
+    assert result.exit_code == 0, result.output
+    assert "base environment" in result.output
+    assert "bare environment" in result.output
+    assert "Preflight will add" not in result.output
+
+
+def test_run_with_tools_does_not_mention_base_environment():
+    result, _ = _run_without_env_options(["--tools", "bash"])
+
+    assert result.exit_code == 0, result.output
+    assert "base environment" not in result.output
 
 
 def test_run_input_dataset_rejects_a_non_id():

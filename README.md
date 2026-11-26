@@ -26,6 +26,16 @@ thoa run \
   --output ./results
 ```
 
+### Environments
+
+Pick the job's software with at most one of these options:
+
+- `--tools "bwa,samtools=1.9"`: conda packages from conda-forge and bioconda.
+- `--env-source environment.yml` (or a pip `requirements.txt`, or `use-current` for your active conda/venv environment).
+- `--env-id <id>`: reuse an environment from `thoa envs list`.
+
+With none of them, the job runs in a base environment: the conda-forge and bioconda channels, no packages. Preflight then adds the packages your command needs, so `thoa run --cmd "samtools --version"` works without `--tools`. With `--disable-preflight`, nothing is added and the command runs in the bare environment.
+
 ### Public data
 
 Pass public accessions straight to `--input`; THOA fetches them server-side, so nothing is downloaded to your machine:

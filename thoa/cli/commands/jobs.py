@@ -1,6 +1,6 @@
 import typer
 import time
-from thoa.core.job_utils import list_jobs, current_job_status, print_job_detail
+from thoa.core.job_utils import list_jobs, current_job_status, find_job, print_job_detail
 from thoa.core.job_status import JobStatus, TERMINAL_STATUSES
 from thoa.core.api_utils import api_client, StreamOutcome
 from thoa.core.reconnect import JobReconnector
@@ -53,7 +53,14 @@ def attach(
 
 
 def _attach(job_id: str) -> None:
-    status = current_job_status(job_id)
+    job = find_job(job_id)
+    if job is None:
+        console.print(
+            f"[bold red]Error:[/bold red] No job found with ID [cyan]{job_id}[/cyan]. "
+            "Use [bold]thoa jobs list[/bold] to see your jobs."
+        )
+        raise typer.Exit(code=1)
+    status = job.get("status", "unknown")
 
     if status in TERMINAL_STATUSES:
         console.print(f"Job [cyan]{job_id}[/cyan] already [bold]{status}[/bold].")
